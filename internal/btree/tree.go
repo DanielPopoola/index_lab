@@ -1,0 +1,59 @@
+// tree.go: for now, this only handles operations on a SINGLE leaf page —
+// no internal nodes, no splitting yet. This is deliberately the smallest
+// possible "real" B+ tree operation: prove Insert/Search work correctly
+// before adding the complexity of multiple levels.
+package btree
+
+import (
+	"errors"
+	"sort"
+
+	"github.com/DanielPopoola/index_lab/internal/page"
+)
+
+// ErrPageFull is returned by Insert when a leaf page has no room for a
+// new entry. Splitting isn't implemented yet — for now this is an honest
+// "not yet supported" signal rather than silently failing or corrupting
+// the page.
+var ErrPageFull = errors.New("page full: splitting not yet implemented")
+
+// findInsertIndex locates where a key belongs in a leaf page's sorted
+// slot array via binary search over the KEY portion of each entr
+func findInsertIndex(p *page.Page, targetKey []byte) (index uint16, found bool) {
+	n := p.NumEntries()
+
+	i := sort.Search(int(n), func(i int) bool {
+		return CompareKeys(p.GetEntry(uint16(i))[:8], targetKey) >= 0
+	})
+
+	if i < int(n) && CompareKeys(p.GetEntry(uint16(i))[:8], targetKey) == 0 {
+		return uint16(i), true
+	}
+
+	return uint16(i), false
+}
+
+func Insert(p *page.Page, key int64, recordID int64) error {
+	encodedKey := EncodeInt64(key)
+	entryBytes := append(encodedKey, EncodeInt64(recordID)...)
+
+	index, _ := findInsertIndex(p, encodedKey)
+
+	if !p.HasSpaceFor(len(entryBytes)) {
+		return ErrPageFull
+	}
+
+	p.InsertEntry(index, entryBytes)
+	return nil
+}
+
+func Search(p *page.Page, key int64) (recordID int64, found bool) {
+	encodedKey := EncodeInt64(key)
+	index, ok := findInsertIndex(p, encodedKey)
+	if !ok {
+		return 0, false
+	}
+	valueBytes := p.GetEntry(index)[8:]
+	value := DecodeInt64(valueBytes)
+	return value, true
+}
