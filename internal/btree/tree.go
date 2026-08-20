@@ -57,3 +57,28 @@ func Search(p *page.Page, key int64) (recordID int64, found bool) {
 	value := DecodeInt64(valueBytes)
 	return value, true
 }
+
+func splitLeaf(oldPage *page.Page, allocateFn func() *page.Page) (separatorKey []byte, newPage *page.Page, err error) {
+	mid := oldPage.NumEntries() / 2
+
+	var moving [][]byte
+	for i := mid; i < oldPage.NumEntries(); i++ {
+		moving = append(moving, oldPage.GetEntry(i))
+	}
+
+	for i := oldPage.NumEntries() - 1; i >= mid; i-- {
+		oldPage.DeleteEntry(i)
+	}
+
+	newPage = allocateFn()
+	for _, entryBytes := range moving {
+		newPage.InsertEntry(newPage.NumEntries(), entryBytes)
+	}
+	newPage.SetPrevLeafPageID(oldPage.ID)
+	newPage.SetNextLeafPageID(oldPage.NextLeafPageID())
+	oldPage.SetNextLeafPageID(newPage.ID)
+
+	separatorKey = newPage.GetEntry(0)[:8]
+
+	return separatorKey, newPage, nil
+}
