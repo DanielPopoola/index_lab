@@ -5,6 +5,7 @@
 package btree
 
 import (
+	"encoding/binary"
 	"errors"
 	"sort"
 
@@ -31,6 +32,22 @@ func findInsertIndex(p *page.Page, targetKey []byte) (index uint16, found bool) 
 	}
 
 	return uint16(i), false
+}
+
+func findChildPageID(p *page.Page, targetKey []byte) page.PageID {
+	n := p.NumEntries()
+	idx := sort.Search(int(n), func(i int) bool {
+		return CompareKeys(p.GetEntry(uint16(i))[:8], targetKey) == 1
+	})
+
+	if idx == 0 {
+		return p.LeftmostChildPageID()
+	}
+
+	entry := p.GetEntry(uint16(idx - 1))
+	childBytes := entry[8:]
+	childID := binary.BigEndian.Uint64(childBytes)
+	return page.PageID(childID)
 }
 
 func Insert(p *page.Page, key int64, recordID int64) error {
@@ -81,4 +98,12 @@ func splitLeaf(oldPage *page.Page, allocateFn func() *page.Page) (separatorKey [
 	separatorKey = newPage.GetEntry(0)[:8]
 
 	return separatorKey, newPage, nil
+}
+
+// encodeChildID turns a page.PageID into its 8-byte big-endian form, for
+// storing as the second half of an internal-page entry.
+func encodeChildID(id page.PageID) []byte {
+	b := make([]byte, 8)
+	binary.BigEndian.PutUint64(b, uint64(id))
+	return b
 }

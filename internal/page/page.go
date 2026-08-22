@@ -46,6 +46,14 @@ func NewLeafPage(id PageID) *Page {
 	return p
 }
 
+func NewInternalPage(id PageID, leftmostChild PageID) *Page {
+	p := &Page{ID: id}
+	p.SetPageType(InternalPage)
+	p.setFreeSpaceOffset(PageSize)
+	p.SetLeftmostChildPageID(leftmostChild)
+	return p
+}
+
 // --- Header accessors ---
 //
 // These read/write fixed fields at fixed offsets in Data[0:HeaderSize].
@@ -84,6 +92,15 @@ func (p *Page) PrevLeafPageID() PageID {
 }
 
 func (p *Page) SetPrevLeafPageID(id PageID) {
+	binary.BigEndian.PutUint64(p.Data[5:13], uint64(id))
+}
+
+// LeftmostChildPageID / SetLeftmostChildPageID: on an INTERNAL page only,
+func (p *Page) LeftmostChildPageID() PageID {
+	return PageID(binary.BigEndian.Uint64(p.Data[5:13]))
+}
+
+func (p *Page) SetLeftmostChildPageID(id PageID) {
 	binary.BigEndian.PutUint64(p.Data[5:13], uint64(id))
 }
 
