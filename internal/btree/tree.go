@@ -100,6 +100,32 @@ func splitLeaf(oldPage *page.Page, allocateFn func() *page.Page) (separatorKey [
 	return separatorKey, newPage, nil
 }
 
+func splitInternal(oldPage *page.Page, allocateFn func() *page.Page) (separatorKey []byte, newPage *page.Page, err error) {
+	mid := oldPage.NumEntries() / 2
+
+	separatorKey = oldPage.GetEntry(mid)[:8]
+	childBytes := oldPage.GetEntry(mid)[8:]
+	middleChildID := page.PageID(binary.BigEndian.Uint64(childBytes))
+
+	var moving [][]byte
+	for i := mid + 1; i < oldPage.NumEntries(); i++ {
+		moving = append(moving, oldPage.GetEntry(i))
+	}
+
+	reserved := allocateFn()
+	newPage = page.NewInternalPage(reserved.ID, middleChildID)
+
+	for _, entryBytes := range moving {
+		newPage.InsertEntry(newPage.NumEntries(), entryBytes)
+	}
+
+	for i := oldPage.NumEntries() - 1; i >= mid; i-- {
+		oldPage.DeleteEntry(i)
+	}
+
+	return separatorKey, newPage, nil
+}
+
 // encodeChildID turns a page.PageID into its 8-byte big-endian form, for
 // storing as the second half of an internal-page entry.
 func encodeChildID(id page.PageID) []byte {

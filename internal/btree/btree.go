@@ -48,42 +48,79 @@ func (t *BTree) Close() error {
 // however many internal-page levels exist, until it reaches and returns
 // an actual LEAF page ready for Insert/Search.
 func (t *BTree) findLeaf(encodedKey []byte) (*page.Page, error) {
-	p, err := t.pm.ReadPage(t.rootID)
+	leaf, _, err := t.findLeafWithPath(encodedKey)
 	if err != nil {
 		return nil, err
 	}
+	return leaf, nil
+}
+
+// findLeafWithPath walks down from the root exactly like findLeaf, but
+// additionally records the PageID of every internal page visited along
+// the way, in top-down order (root first). This gives the caller a
+// bottom-up path to walk back up if the leaf ends up needing to split:
+// pop the last-visited (closest) ancestor first.
+func (t *BTree) findLeafWithPath(encodedKey []byte) (leaf *page.Page, ancestors []page.PageID, err error) {
+	p, err := t.pm.ReadPage(t.rootID)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	for p.PageType() == page.InternalPage {
+		ancestors = append(ancestors, p.ID)
+
 		childID := findChildPageID(p, encodedKey)
 		p, err = t.pm.ReadPage(childID)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
-	return p, nil
+	return p, ancestors, nil
 }
 
 // Insert adds a (key, recordID) pair to the tree.
 func (t *BTree) Insert(key int64, recordID int64) error {
 	encodedKey := EncodeInt64(key)
 
-	leaf, err := t.findLeaf(encodedKey)
+	leaf, ancestors, err := t.findLeafWithPath(encodedKey)
 	if err != nil {
 		return err
 	}
 
 	err = Insert(leaf, key, recordID)
 	if err == nil {
-		// fit without splitting — just persist and we're done
 		return t.pm.WritePage(leaf)
 	}
 	if err != ErrPageFull {
 		return err
 	}
 
-	// leaf is full: split it, then handle promoting the separator.
-	return t.insertWithSplit(leaf, key, recordID)
+	// Leaf is full. Split it, insert the new key into whichever half
+	// it belongs in, then let propagateSplit wire the split into the
+	// tree (parent insert, recursive split, or new root).
+	separatorKey, newLeaf, err := splitLeaf(leaf, t.pm.AllocatePage)
+	if err != nil {
+		return err
+	}
+
+	if CompareKeys(encodedKey, separatorKey) >= 0 {
+		err = Insert(newLeaf, key, recordID)
+	} else {
+		err = Insert(leaf, key, recordID)
+	}
+	if err != nil {
+		return err
+	}
+
+	if err := t.pm.WritePage(leaf); err != nil {
+		return err
+	}
+	if err := t.pm.WritePage(newLeaf); err != nil {
+		return err
+	}
+
+	return t.propagateSplit(leaf, newLeaf, separatorKey, ancestors)
 }
 
 // Search looks up a key in the tree.
@@ -98,56 +135,66 @@ func (t *BTree) Search(key int64) (recordID int64, found bool) {
 	return Search(leaf, key)
 }
 
-// insertWithSplit handles the case where leaf was full: split it, insert
-// the new key into whichever resulting half it belongs in, and wire the
-// split into the tree structure.
-//
-// SCOPE FOR TONIGHT: only handles the case where the split leaf's parent
-// is nothing yet (leaf was the root). This covers going from a
-// single-leaf tree to a root+2-leaves tree. It does NOT yet handle
-// splitting a leaf that already has an internal parent — that's a real
-// gap, to close next session. Given tonight's leaf always starts as the
-// sole root, this gap isn't reachable yet.
-func (t *BTree) insertWithSplit(leaf *page.Page, key, recordID int64) error {
-	separatorKey, newLeaf, err := splitLeaf(leaf, t.pm.AllocatePage)
+// propagateSplit wires an already-completed split (p, newPage,
+// separatorKey) into the tree: push the separator into the parent
+// (from ancestors), or make a new root if there's no parent. If the
+// parent itself is full, split the parent too, and recurse.
+func (t *BTree) propagateSplit(p, newPage *page.Page, separatorKey []byte, ancestors []page.PageID) error {
+	if len(ancestors) == 0 {
+		newRootPage := t.pm.AllocatePage()
+		newRoot := page.NewInternalPage(newRootPage.ID, p.ID)
+		entryBytes := append(append([]byte{}, separatorKey...), encodeChildID(newPage.ID)...)
+		newRoot.InsertEntry(0, entryBytes)
+		if err := t.pm.WritePage(newRoot); err != nil {
+			return err
+		}
+		t.rootID = newRoot.ID
+		return nil
+	}
+
+	parentID := ancestors[len(ancestors)-1]
+	remaining := ancestors[:len(ancestors)-1]
+
+	parent, err := t.pm.ReadPage(parentID)
 	if err != nil {
 		return err
 	}
 
-	encodedKey := EncodeInt64(key)
-	if CompareKeys(encodedKey, separatorKey) >= 0 {
-		if err := Insert(newLeaf, key, recordID); err != nil {
-			return err
-		}
+	entryBytes := append(append([]byte{}, separatorKey...), encodeChildID(newPage.ID)...)
+
+	if parent.HasSpaceFor(len(entryBytes)) {
+		idx, _ := findInsertIndex(parent, separatorKey)
+		parent.InsertEntry(idx, entryBytes)
+		return t.pm.WritePage(parent)
+	}
+
+	var parentSeparator []byte
+	var newParent *page.Page
+	if parent.PageType() == page.InternalPage {
+		parentSeparator, newParent, err = splitInternal(parent, t.pm.AllocatePage)
 	} else {
-		if err := Insert(leaf, key, recordID); err != nil {
-			return err
-		}
+		parentSeparator, newParent, err = splitLeaf(parent, t.pm.AllocatePage)
 	}
-
-	if err := t.pm.WritePage(leaf); err != nil {
-		return err
-	}
-	if err := t.pm.WritePage(newLeaf); err != nil {
+	if err != nil {
 		return err
 	}
 
-	// Create a new root: an internal page whose leftmost child is the
-	// OLD leaf (still holding the smaller keys, still at its original
-	// PageID), and whose one entry is (separatorKey, newLeaf.ID).
-	newRootPage := t.pm.AllocatePage()
-	newRoot := page.NewInternalPage(newRootPage.ID, leaf.ID)
+	// Decide which half of the split parent should receive
+	// (separatorKey, newPage.ID), same idea as the leaf case in Insert.
+	if CompareKeys(separatorKey, parentSeparator) >= 0 {
+		idx, _ := findInsertIndex(newParent, separatorKey)
+		newParent.InsertEntry(idx, entryBytes)
+	} else {
+		idx, _ := findInsertIndex(parent, separatorKey)
+		parent.InsertEntry(idx, entryBytes)
+	}
 
-	entryBytes := append(append([]byte{}, separatorKey...), encodeChildID(newLeaf.ID)...)
-	newRoot.InsertEntry(0, entryBytes)
-
-	if err := t.pm.WritePage(newRoot); err != nil {
+	if err := t.pm.WritePage(parent); err != nil {
+		return err
+	}
+	if err := t.pm.WritePage(newParent); err != nil {
 		return err
 	}
 
-	// The new internal page is now the root.
-	t.rootID = newRoot.ID
-
-	return nil
-
+	return t.propagateSplit(parent, newParent, parentSeparator, remaining)
 }
