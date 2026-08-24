@@ -39,6 +39,8 @@ type Page struct {
 	Data [PageSize]byte
 }
 
+// NewLeafPage builds a fresh, empty leaf page with the given ID, ready
+// for InsertEntry calls.
 func NewLeafPage(id PageID) *Page {
 	p := &Page{ID: id}
 	p.SetPageType(LeafPage)
@@ -46,6 +48,11 @@ func NewLeafPage(id PageID) *Page {
 	return p
 }
 
+// NewInternalPage builds a fresh, empty internal page with the given ID
+// and leftmost child. Internal pages route searches: with N children,
+// they store N-1 separator entries plus this one extra leftmost-child
+// pointer, which has no separator of its own (it's implicitly "less
+// than everything").
 func NewInternalPage(id PageID, leftmostChild PageID) *Page {
 	p := &Page{ID: id}
 	p.SetPageType(InternalPage)
@@ -78,37 +85,52 @@ func (p *Page) setNumEntries(n uint16) {
 	binary.BigEndian.PutUint16(p.Data[1:3], n)
 }
 
-// NextLeafPageID / PrevLeafPageID: sibling links for leaf pages (spec section 5).
+// NextLeafPageID returns the PageID of this leaf's right sibling (spec
+// section 5), or 0 if it has none. Only meaningful on leaf pages.
 func (p *Page) NextLeafPageID() PageID {
 	return PageID(binary.BigEndian.Uint64(p.Data[13:21]))
 }
 
+// SetNextLeafPageID sets this leaf's right-sibling pointer.
 func (p *Page) SetNextLeafPageID(id PageID) {
 	binary.BigEndian.PutUint64(p.Data[13:21], uint64(id))
 }
 
+// PrevLeafPageID returns the PageID of this leaf's left sibling, or 0 if
+// it has none. Only meaningful on leaf pages. Shares storage with
+// LeftmostChildPageID since a page is never both a leaf and internal.
 func (p *Page) PrevLeafPageID() PageID {
 	return PageID(binary.BigEndian.Uint64(p.Data[5:13]))
 }
 
+// SetPrevLeafPageID sets this leaf's left-sibling pointer.
 func (p *Page) SetPrevLeafPageID(id PageID) {
 	binary.BigEndian.PutUint64(p.Data[5:13], uint64(id))
 }
 
-// LeftmostChildPageID / SetLeftmostChildPageID: on an INTERNAL page only,
+// LeftmostChildPageID returns the child pointer that has no attached
+// separator key — the child visited when a search key is less than
+// every separator on this page. Only meaningful on internal pages.
+// Shares storage with PrevLeafPageID since a page is never both a leaf
+// and internal.
 func (p *Page) LeftmostChildPageID() PageID {
 	return PageID(binary.BigEndian.Uint64(p.Data[5:13]))
 }
 
+// SetLeftmostChildPageID sets this internal page's leftmost-child
+// pointer.
 func (p *Page) SetLeftmostChildPageID(id PageID) {
 	binary.BigEndian.PutUint64(p.Data[5:13], uint64(id))
 }
 
-// freeSpaceOffset returns the byte offset where entry data currently starts
+// freeSpaceOffset returns the byte offset where entry data currently
+// starts, growing downward from PageSize as entries are inserted.
 func (p *Page) freeSpaceOffset() uint16 {
 	return binary.BigEndian.Uint16(p.Data[3:5])
 }
 
+// setFreeSpaceOffset writes the current free-space offset into the
+// header.
 func (p *Page) setFreeSpaceOffset(offset uint16) {
 	binary.BigEndian.PutUint16(p.Data[3:5], offset)
 }
@@ -160,7 +182,9 @@ func (p *Page) HasSpaceFor(entryLen int) bool {
 }
 
 // InsertEntry inserts entryBytes as a new entry, placing its slot at
-// sorted position `slotIndex` in the slot array..
+// sorted position slotIndex in the slot array. Callers are responsible
+// for finding the correct slotIndex (e.g. via a sorted search over
+// existing entries) and for checking HasSpaceFor first.
 func (p *Page) InsertEntry(slotIndex uint16, entryBytes []byte) {
 	n := p.NumEntries()
 
@@ -183,10 +207,12 @@ func (p *Page) InsertEntry(slotIndex uint16, entryBytes []byte) {
 }
 
 // DeleteEntry removes the entry at the given slot index, shifting later
-
 // slots left by one. Does NOT reclaim the physical bytes of the deleted
 // entry in the entry-data area (that's fragmentation — out of scope here,
 // per spec section 18; real databases fix this via periodic compaction).
+// When deleting multiple entries by index, delete from the highest
+// index to the lowest — deleting low-to-high shifts later entries into
+// indices you haven't processed yet, silently skipping them.
 func (p *Page) DeleteEntry(slotIndex uint16) {
 	n := p.NumEntries()
 

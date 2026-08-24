@@ -17,6 +17,11 @@ type PageManager struct {
 	nextPageID page.PageID
 }
 
+// Open opens the database file at path for reading and writing,
+// creating it if it doesn't already exist. The existing file size is
+// used to infer how many pages it already holds, so subsequent
+// AllocatePage calls continue from the correct next PageID rather than
+// colliding with pages written in a previous session.
 func Open(path string) (*PageManager, error) {
 	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
@@ -36,16 +41,23 @@ func Open(path string) (*PageManager, error) {
 	return pm, nil
 }
 
+// Close closes the underlying database file.
 func (pm *PageManager) Close() error {
 	return pm.file.Close()
 }
 
+// AllocatePage reserves the next unused PageID and returns a fresh leaf
+// page with that ID. The page is not written to disk until a caller
+// passes it to WritePage — allocation only reserves the ID, it doesn't
+// persist anything.
 func (pm *PageManager) AllocatePage() *page.Page {
 	id := pm.nextPageID
 	pm.nextPageID++
 	return page.NewLeafPage(id)
 }
 
+// ReadPage reads the page with the given PageID from disk, computing
+// its byte offset as id * PageSize.
 func (pm *PageManager) ReadPage(id page.PageID) (*page.Page, error) {
 	offset := int64(id) * page.PageSize
 	if _, err := pm.file.Seek(offset, io.SeekStart); err != nil {
@@ -59,6 +71,8 @@ func (pm *PageManager) ReadPage(id page.PageID) (*page.Page, error) {
 	return p, nil
 }
 
+// WritePage writes p's bytes to disk at the offset corresponding to
+// p.ID, overwriting whatever was previously stored there.
 func (pm *PageManager) WritePage(p *page.Page) error {
 	offset := int64(p.ID) * page.PageSize
 	if _, err := pm.file.Seek(offset, io.SeekStart); err != nil {
@@ -70,6 +84,8 @@ func (pm *PageManager) WritePage(p *page.Page) error {
 	return nil
 }
 
+// PageCount returns the number of pages that have been allocated so
+// far, i.e. the next PageID that AllocatePage would hand out.
 func (pm *PageManager) PageCount() page.PageID {
 	return pm.nextPageID
 }
