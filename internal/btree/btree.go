@@ -1,12 +1,5 @@
 // Package btree implements a persistent B+ tree on top of the page and
-// storage packages. It ties together storage.PageManager (disk I/O)
-// with the leaf-level Insert/Search from tree.go, adding: root
-// tracking, multi-level root-to-leaf traversal, and insertion with
-// splitting (leaf splits, internal-page splits, and root splits, all
-// propagated via propagateSplit). PageID 0 is reserved for a metadata
-// page that durably tracks the current root PageID across reopens,
-// since the root's identity changes over the tree's life every time it
-// splits.
+// storage packages.
 package btree
 
 import (
@@ -14,20 +7,14 @@ import (
 	"github.com/DanielPopoola/index_lab/internal/storage"
 )
 
-// BTree is a persistent B+ tree backed by a single database file. It
-// wraps a storage.PageManager and adds tree structure on top: root
-// tracking, multi-level traversal, and insertion with splitting.
+// Persistent B+ tree backed by a single database file.
+// Wraps a `*storage.PageManager` and tracks the current root `PageID`.
 type BTree struct {
 	pm     *storage.PageManager
 	rootID page.PageID
 }
 
-// Open opens (or creates) a B+ tree backed by the database file at
-// path. PageID 0 is always reserved for a metadata page holding the
-// tree's current root PageID: on a brand-new file, it's created
-// pointing at the first real page (ID 1); on an existing file, it's
-// read back to recover whatever the root actually is, which may have
-// changed since the file was last opened if the root ever split.
+// Opens or creates a B+ tree at `path`.
 func Open(path string) (*BTree, error) {
 	pm, err := storage.Open(path)
 	if err != nil {
@@ -60,16 +47,13 @@ func Open(path string) (*BTree, error) {
 	return &BTree{pm: pm, rootID: rootID}, nil
 }
 
-// Close closes the underlying PageManager.
+// Closes the underlying `PageManager`.
 func (t *BTree) Close() error {
 	return t.pm.Close()
 }
 
-// findLeaf walks down from the root, following findChildPageID through
-// however many internal-page levels exist, until it reaches and returns
-// an actual leaf page ready for Insert/Search. It is findLeafWithPath
-// with the ancestor path discarded, for callers (like Search) that only
-// need the leaf.
+// Walks root-to-leaf, following child pointers through however many internal-page levels exist.
+// Thin wrapper over `findLeafWithPath` that discards the ancestor path.
 func (t *BTree) findLeaf(encodedKey []byte) (*page.Page, error) {
 	leaf, _, err := t.findLeafWithPath(encodedKey)
 	if err != nil {
@@ -78,14 +62,8 @@ func (t *BTree) findLeaf(encodedKey []byte) (*page.Page, error) {
 	return leaf, nil
 }
 
-// findLeafWithPath walks down from the root exactly like findLeaf, but
-// additionally records the PageID of every internal page visited along
-// the way, in top-down order (root first, immediate parent last). This
-// gives the caller a bottom-up path to walk back up if the leaf ends up
-// needing to split: pop the last-visited (closest) ancestor first. Only
-// internal pages are ever pushed — the loop that pushes exits before
-// processing a leaf, so a leaf's own ID never lands on its own
-// ancestor stack.
+// Same traversal as `findLeaf`, additionally returning `ancestors`:
+// every internal page visited on the way down, in top-down order (root first, immediate parent of the leaf last).
 func (t *BTree) findLeafWithPath(encodedKey []byte) (leaf *page.Page, ancestors []page.PageID, err error) {
 	p, err := t.pm.ReadPage(t.rootID)
 	if err != nil {
@@ -105,9 +83,7 @@ func (t *BTree) findLeafWithPath(encodedKey []byte) (leaf *page.Page, ancestors 
 	return p, ancestors, nil
 }
 
-// Insert adds a (key, recordID) pair to the tree, splitting leaf and
-// internal pages as needed and growing the tree's height if the root
-// itself ends up splitting.
+// Inserts `(key, recordID)`.
 func (t *BTree) Insert(key int64, recordID int64) error {
 	encodedKey := EncodeInt64(key)
 
@@ -151,7 +127,7 @@ func (t *BTree) Insert(key int64, recordID int64) error {
 	return t.propagateSplit(leaf, newLeaf, separatorKey, ancestors)
 }
 
-// Search looks up key in the tree and reports whether it was found.
+// Looks up `key`
 func (t *BTree) Search(key int64) (recordID int64, found bool) {
 	encodedKey := EncodeInt64(key)
 
@@ -163,22 +139,7 @@ func (t *BTree) Search(key int64) (recordID int64, found bool) {
 	return Search(leaf, key)
 }
 
-// propagateSplit wires an already-completed split (p, newPage,
-// separatorKey) into the tree. p holds the smaller half of whatever
-// just split and newPage the larger half; propagateSplit does not
-// split p itself (see Insert, which splits the leaf before calling
-// this). It pops the closest ancestor off ancestors and tries to
-// insert (separatorKey, newPage.ID) there:
-//
-//   - if ancestors is empty, p had no parent (it was the root), so a
-//     new root page is allocated with p as its leftmost child.
-//   - if the popped parent has space, the entry is inserted directly.
-//   - if the parent is also full, the parent itself is split (leaf or
-//     internal, via splitLeaf/splitInternal as appropriate), the
-//     pending entry is placed in whichever half it belongs to, and
-//     propagateSplit recurses one level further up with the remaining
-//     ancestors. Recursion depth is bounded by tree height, which
-//     stays small by construction given B+ tree fan-out.
+// Wires an already-completed split into the tree structure.
 func (t *BTree) propagateSplit(p, newPage *page.Page, separatorKey []byte, ancestors []page.PageID) error {
 	if len(ancestors) == 0 {
 		newRootPage := t.pm.AllocatePage()

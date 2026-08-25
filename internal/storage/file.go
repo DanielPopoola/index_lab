@@ -10,18 +10,14 @@ import (
 	"github.com/DanielPopoola/index_lab/internal/page"
 )
 
-// PageManager owns a single open file and knows how to read/write
-// fixed-size pages to/from it by PageID.
+// Owns a single open file and translates `PageID`s into byte offsets for reading/writing fixed-size pages.
 type PageManager struct {
 	file       *os.File
 	nextPageID page.PageID
 }
 
-// Open opens the database file at path for reading and writing,
-// creating it if it doesn't already exist. The existing file size is
-// used to infer how many pages it already holds, so subsequent
-// AllocatePage calls continue from the correct next PageID rather than
-// colliding with pages written in a previous session.
+// Opens the database file at `path`, creating it if absent.
+// Infers the next allocatable `PageID` from the existing file size (`fileInfo.Size() / PageSize`).
 func Open(path string) (*PageManager, error) {
 	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
@@ -46,18 +42,14 @@ func (pm *PageManager) Close() error {
 	return pm.file.Close()
 }
 
-// AllocatePage reserves the next unused PageID and returns a fresh leaf
-// page with that ID. The page is not written to disk until a caller
-// passes it to WritePage — allocation only reserves the ID, it doesn't
-// persist anything.
+// Reserves the next unused `PageID` and returns a fresh leaf page with that ID.
 func (pm *PageManager) AllocatePage() *page.Page {
 	id := pm.nextPageID
 	pm.nextPageID++
 	return page.NewLeafPage(id)
 }
 
-// ReadPage reads the page with the given PageID from disk, computing
-// its byte offset as id * PageSize.
+// Reads the page at `id` from disk
 func (pm *PageManager) ReadPage(id page.PageID) (*page.Page, error) {
 	offset := int64(id) * page.PageSize
 	if _, err := pm.file.Seek(offset, io.SeekStart); err != nil {
@@ -71,8 +63,7 @@ func (pm *PageManager) ReadPage(id page.PageID) (*page.Page, error) {
 	return p, nil
 }
 
-// WritePage writes p's bytes to disk at the offset corresponding to
-// p.ID, overwriting whatever was previously stored there.
+// Writes `p.Data` to disk at the offset corresponding to `p.ID`, overwriting any existing contents there.
 func (pm *PageManager) WritePage(p *page.Page) error {
 	offset := int64(p.ID) * page.PageSize
 	if _, err := pm.file.Seek(offset, io.SeekStart); err != nil {
@@ -84,16 +75,12 @@ func (pm *PageManager) WritePage(p *page.Page) error {
 	return nil
 }
 
-// PageCount returns the number of pages that have been allocated so
-// far, i.e. the next PageID that AllocatePage would hand out.
+// Returns the number of pages allocated so far (equivalently, the next `PageID` `AllocatePage` would hand out).
 func (pm *PageManager) PageCount() page.PageID {
 	return pm.nextPageID
 }
 
-// SetNextPageID overrides the next PageID that AllocatePage will hand
-// out. Intended for callers that reserve low PageIDs for their own
-// purposes (e.g. btree reserving PageID 0 for a metadata page) before
-// any normal allocation happens.
+// Overrides the next `PageID` that `AllocatePage` will hand out.
 func (pm *PageManager) SetNextPageID(id page.PageID) {
 	pm.nextPageID = id
 }

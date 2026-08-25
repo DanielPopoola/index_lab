@@ -45,9 +45,6 @@ func TestInsertAndSearch(t *testing.T) {
 
 }
 
-// TestSplitLeaf proves splitLeaf correctly divides a full leaf's entries,
-// wires up sibling pointers, and returns the correct separator key —
-// using a FAKE allocator, so this test needs no real file/PageManager.
 func TestSplitLeaf(t *testing.T) {
 	oldPage := page.NewLeafPage(0)
 

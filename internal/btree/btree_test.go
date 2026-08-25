@@ -7,11 +7,6 @@ import (
 	"github.com/DanielPopoola/index_lab/internal/page"
 )
 
-// TestBTreeSurvivesReopen proves the full stack works end to end, through
-// the public BTree API (not reaching into page/storage directly): insert
-// keys, close the tree, reopen the SAME file, and confirm every key is
-// still searchable with the correct recordID. This is the same shape as
-// storage's TestPageSurvivesReopen, one layer up.
 func TestBTreeSurvivesReopen(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 
@@ -54,17 +49,6 @@ func TestBTreeSurvivesReopen(t *testing.T) {
 	}
 }
 
-// TestBTreeSurvivesReopenAfterSplit specifically targets the root-ID
-// persistence bug: TestBTreeSurvivesReopen alone doesn't catch it,
-// because it only inserts 3 keys — never enough to make the root
-// change from PageID 1 to something else, so the old "always assume
-// root is PageID 0/1 on reopen" bug would pass that test by
-// coincidence. This test inserts enough keys to force at least one
-// split (root becomes a real internal page with a new PageID), THEN
-// closes and reopens, and confirms every key is still searchable. If
-// the metadata page (PageID 0) weren't correctly written on split and
-// read back on Open, this would fail — either by silently returning
-// wrong/no results, or by treating stale bytes as a tree page.
 func TestBTreeSurvivesReopenAfterSplit(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 
@@ -112,15 +96,6 @@ func TestBTreeSurvivesReopenAfterSplit(t *testing.T) {
 	}
 }
 
-// TestInsertTriggersSplit inserts enough keys to force exactly ONE leaf
-// split (root leaf -> root internal page + 2 leaves), then confirms every
-// key is still correctly searchable through the resulting structure.
-//
-// SCOPE NOTE: this deliberately stays within a single split. A SECOND
-// split (once the root is already an internal page) isn't handled yet —
-// insertWithSplit only knows how to promote a brand new root from a
-// leaf-was-root state. Inserting enough keys to force multiple splits
-// will currently break; that's the next thing to build, not tonight.
 func TestInsertTriggersSplit(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 
@@ -162,17 +137,6 @@ func TestInsertTriggersSplit(t *testing.T) {
 	}
 }
 
-// TestInsertTriggersMultiLevelSplit forces a SECOND level of splitting:
-// enough leaf splits happen that the root (now an internal page) itself
-// overflows and has to split too, requiring propagateSplit to recurse
-// past a single level (leaf -> parent) and instead build a brand new
-// root above two internal pages.
-//
-// A page holds ~203 entries (4096 - 21 header) / (16 entry + 4 slot).
-// That's true for both leaf AND internal pages, since internal entries
-// are also 16 bytes (8 key + 8 childID). So forcing the ROOT itself to
-// split needs roughly 203 leaf splits' worth of keys, i.e. ~203 * 203.
-// Rounding up generously to be safely past that threshold.
 func TestInsertTriggersMultiLevelSplit(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 
