@@ -54,6 +54,64 @@ func TestBTreeSurvivesReopen(t *testing.T) {
 	}
 }
 
+// TestBTreeSurvivesReopenAfterSplit specifically targets the root-ID
+// persistence bug: TestBTreeSurvivesReopen alone doesn't catch it,
+// because it only inserts 3 keys — never enough to make the root
+// change from PageID 1 to something else, so the old "always assume
+// root is PageID 0/1 on reopen" bug would pass that test by
+// coincidence. This test inserts enough keys to force at least one
+// split (root becomes a real internal page with a new PageID), THEN
+// closes and reopens, and confirms every key is still searchable. If
+// the metadata page (PageID 0) weren't correctly written on split and
+// read back on Open, this would fail — either by silently returning
+// wrong/no results, or by treating stale bytes as a tree page.
+func TestBTreeSurvivesReopenAfterSplit(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	const numKeys = 300 // comfortably past the ~203-entry-per-page split threshold
+
+	tree1, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	for i := int64(0); i < numKeys; i++ {
+		if err := tree1.Insert(i, i*10); err != nil {
+			t.Fatalf("Insert(%d) failed: %v", i, err)
+		}
+	}
+
+	rootBeforeClose := tree1.rootID
+	if rootBeforeClose == 1 {
+		t.Fatalf("setup problem: root is still PageID 1 after %d inserts, expected a split to have changed it", numKeys)
+	}
+
+	if err := tree1.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	tree2, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer tree2.Close()
+
+	if tree2.rootID != rootBeforeClose {
+		t.Fatalf("root PageID after reopen = %d, want %d (the root from before closing)", tree2.rootID, rootBeforeClose)
+	}
+
+	for _, key := range []int64{0, 1, numKeys / 2, numKeys - 1} {
+		gotRecordID, found := tree2.Search(key)
+		if !found {
+			t.Errorf("Search(%d): after reopen, expected found=true, got false", key)
+			continue
+		}
+		if gotRecordID != key*10 {
+			t.Errorf("Search(%d): after reopen, recordID = %d, want %d", key, gotRecordID, key*10)
+		}
+	}
+}
+
 // TestInsertTriggersSplit inserts enough keys to force exactly ONE leaf
 // split (root leaf -> root internal page + 2 leaves), then confirms every
 // key is still correctly searchable through the resulting structure.

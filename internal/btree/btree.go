@@ -3,14 +3,10 @@
 // with the leaf-level Insert/Search from tree.go, adding: root
 // tracking, multi-level root-to-leaf traversal, and insertion with
 // splitting (leaf splits, internal-page splits, and root splits, all
-// propagated via propagateSplit).
-//
-// CURRENT SIMPLIFICATION: rootID is tracked only in memory and does not
-// survive reopening a tree whose root has ever changed (e.g. after a
-// split grew the tree past one level) — Open still assumes rootID is
-// PageID 0 on reopen. A persisted, changeable root ID (via a dedicated
-// metadata page) is needed to fix this; see the deferred work noted in
-// project memory.
+// propagated via propagateSplit). PageID 0 is reserved for a metadata
+// page that durably tracks the current root PageID across reopens,
+// since the root's identity changes over the tree's life every time it
+// splits.
 package btree
 
 import (
@@ -27,11 +23,11 @@ type BTree struct {
 }
 
 // Open opens (or creates) a B+ tree backed by the database file at
-// path. On reopen, rootID is currently always assumed to be PageID 0 —
-// see the package-level CURRENT SIMPLIFICATION note. This is correct as
-// long as the root has never split; once persisted root-ID metadata
-// exists, reopening a tree whose root changed will need to read the
-// real root ID instead of assuming 0.
+// path. PageID 0 is always reserved for a metadata page holding the
+// tree's current root PageID: on a brand-new file, it's created
+// pointing at the first real page (ID 1); on an existing file, it's
+// read back to recover whatever the root actually is, which may have
+// changed since the file was last opened if the root ever split.
 func Open(path string) (*BTree, error) {
 	pm, err := storage.Open(path)
 	if err != nil {
@@ -40,13 +36,25 @@ func Open(path string) (*BTree, error) {
 
 	var rootID page.PageID
 	if pm.PageCount() == 0 {
-		root := pm.AllocatePage()
-		rootID = root.ID
-		if err := pm.WritePage(root); err != nil {
+		// Brand-new file: reserve PageID 0 for metadata, so real tree
+		// pages start from PageID 1.
+		pm.SetNextPageID(1)
+		firstLeaf := pm.AllocatePage()
+		rootID = firstLeaf.ID
+
+		metaPage := page.NewMetadataPage(0, rootID)
+		if err := pm.WritePage(metaPage); err != nil {
+			return nil, err
+		}
+		if err := pm.WritePage(firstLeaf); err != nil {
 			return nil, err
 		}
 	} else {
-		rootID = 0
+		metaPage, err := pm.ReadPage(0)
+		if err != nil {
+			return nil, err
+		}
+		rootID = metaPage.RootPageID()
 	}
 
 	return &BTree{pm: pm, rootID: rootID}, nil
@@ -180,6 +188,15 @@ func (t *BTree) propagateSplit(p, newPage *page.Page, separatorKey []byte, ances
 		if err := t.pm.WritePage(newRoot); err != nil {
 			return err
 		}
+
+		// The root changed — update the durable metadata page (PageID
+		// 0) so a future Open recovers the real root instead of the
+		// stale one.
+		metaPage := page.NewMetadataPage(0, newRoot.ID)
+		if err := t.pm.WritePage(metaPage); err != nil {
+			return err
+		}
+
 		t.rootID = newRoot.ID
 		return nil
 	}

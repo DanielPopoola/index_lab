@@ -17,13 +17,20 @@ const (
 	SlotSize = 4
 )
 
-// PageType distinguishes a leaf page (holds real entries) from an internal
-// page (holds separator keys + child PageIDs). Only Leaf is needed for now.
+// PageType distinguishes a leaf page (holds real entries), an internal
+// page (holds separator keys + child PageIDs), and a metadata page
+// (holds tree-wide bookkeeping, currently just the root PageID). A
+// metadata page is deliberately its own type rather than reusing
+// LeafPage — code that walks the tree checks PageType() to decide
+// whether to keep descending or stop; giving metadata pages their own
+// type means an accidental read of one is caught as an unexpected type
+// rather than silently misinterpreted as real leaf entries.
 type PageType uint8
 
 const (
 	LeafPage PageType = iota
 	InternalPage
+	MetadataPage
 )
 
 // PageID identifies a page's position in the file. PageID N lives at byte
@@ -59,6 +66,30 @@ func NewInternalPage(id PageID, leftmostChild PageID) *Page {
 	p.setFreeSpaceOffset(PageSize)
 	p.SetLeftmostChildPageID(leftmostChild)
 	return p
+}
+
+// NewMetadataPage builds a metadata page holding the given root PageID.
+// A metadata page carries no entries and no slot array — it's a single
+// small, fixed field, currently just RootPageID. It exists so a
+// database file always has a durable, known-location answer to "which
+// page is currently the tree's root," which changes over the tree's
+// life every time the root splits.
+func NewMetadataPage(id PageID, rootID PageID) *Page {
+	p := &Page{ID: id}
+	p.SetPageType(MetadataPage)
+	p.SetRootPageID(rootID)
+	return p
+}
+
+// RootPageID returns the root PageID stored in a metadata page. Only
+// meaningful on a page whose PageType is MetadataPage.
+func (p *Page) RootPageID() PageID {
+	return PageID(binary.BigEndian.Uint64(p.Data[1:9]))
+}
+
+// SetRootPageID sets the root PageID stored in a metadata page.
+func (p *Page) SetRootPageID(id PageID) {
+	binary.BigEndian.PutUint64(p.Data[1:9], uint64(id))
 }
 
 // --- Header accessors ---

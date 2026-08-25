@@ -89,3 +89,11 @@ func (pm *PageManager) WritePage(p *page.Page) error {
 func (pm *PageManager) PageCount() page.PageID {
 	return pm.nextPageID
 }
+
+// SetNextPageID overrides the next PageID that AllocatePage will hand
+// out. Intended for callers that reserve low PageIDs for their own
+// purposes (e.g. btree reserving PageID 0 for a metadata page) before
+// any normal allocation happens.
+func (pm *PageManager) SetNextPageID(id page.PageID) {
+	pm.nextPageID = id
+}
