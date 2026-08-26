@@ -2,6 +2,7 @@ package btree
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 
 	"github.com/DanielPopoola/index_lab/internal/page"
@@ -43,6 +44,55 @@ func TestInsertAndSearch(t *testing.T) {
 		t.Errorf("NumEntries() = %d, want 3", p.NumEntries())
 	}
 
+}
+
+func TestDelete(t *testing.T) {
+	p := page.NewLeafPage(0)
+
+	entries := []struct{ key, recordID int64 }{
+		{30, 300},
+		{10, 100},
+		{20, 200},
+	}
+
+	for _, e := range entries {
+		if err := Insert(p, e.key, e.recordID); err != nil {
+			t.Fatalf("Insert(%d) failed: %v", e.key, err)
+		}
+	}
+
+	if err := Delete(p, 20); err != nil {
+		t.Fatalf("Delete failed: %v", err)
+	}
+
+	_, ok := Search(p, 20)
+	if ok {
+		t.Fatalf("Deleted key still exists")
+	}
+
+	if p.NumEntries() != 2 {
+		t.Fatalf("Expected %d entries but got: 2", p.NumEntries())
+	}
+
+	for _, e := range entries[:2] {
+		gotRecordID, found := Search(p, e.key)
+		if !found {
+			t.Errorf("Search(p, %d): expected found=true, got false", e.key)
+			continue
+		}
+		if gotRecordID != e.recordID {
+			t.Errorf("Search(p, %d): recordID = %d, want %d", e.key, gotRecordID, e.recordID)
+		}
+	}
+
+	err := Delete(p, 999)
+	if !errors.Is(err, ErrKeyNotFound) {
+		t.Fatalf("Delete(999): err = %v, want ErrKeyNotFound", err)
+	}
+
+	if p.NumEntries() != 2 {
+		t.Fatalf("Expected %d entries but got: 2", p.NumEntries())
+	}
 }
 
 func TestSplitLeaf(t *testing.T) {

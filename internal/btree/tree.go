@@ -12,12 +12,12 @@ import (
 	"github.com/DanielPopoola/index_lab/internal/page"
 )
 
-// Returned by the package-level `Insert` when a single page has no room for a new entry.
 var ErrPageFull = errors.New("page full: splitting not yet implemented")
+var ErrKeyNotFound = errors.New("key not found")
 
 // Binary search over `p`'s sorted entries for `targetKey`, comparing the first 8 bytes of each entry.
 // Works on both leaf and internal pages (both store the key as the first 8 bytes of every entry).
-func findInsertIndex(p *page.Page, targetKey []byte) (index uint16, found bool) {
+func findKeyIndex(p *page.Page, targetKey []byte) (index uint16, found bool) {
 	n := p.NumEntries()
 
 	i := sort.Search(int(n), func(i int) bool {
@@ -53,7 +53,7 @@ func Insert(p *page.Page, key int64, recordID int64) error {
 	encodedKey := EncodeInt64(key)
 	entryBytes := append(encodedKey, EncodeInt64(recordID)...)
 
-	index, _ := findInsertIndex(p, encodedKey)
+	index, _ := findKeyIndex(p, encodedKey)
 
 	if !p.HasSpaceFor(len(entryBytes)) {
 		return ErrPageFull
@@ -66,13 +66,24 @@ func Insert(p *page.Page, key int64, recordID int64) error {
 // Looks up `key` on `p` directly. Does not traverse the tree.
 func Search(p *page.Page, key int64) (recordID int64, found bool) {
 	encodedKey := EncodeInt64(key)
-	index, ok := findInsertIndex(p, encodedKey)
+	index, ok := findKeyIndex(p, encodedKey)
 	if !ok {
 		return 0, false
 	}
 	valueBytes := p.GetEntry(index)[8:]
 	value := DecodeInt64(valueBytes)
 	return value, true
+}
+
+// Deletes `key` from `p` directly
+func Delete(p *page.Page, key int64) error {
+	encodedKey := EncodeInt64(key)
+	index, ok := findKeyIndex(p, encodedKey)
+	if !ok {
+		return ErrKeyNotFound
+	}
+	p.DeleteEntry(index)
+	return nil
 }
 
 // Splits a full leaf page. The smaller half (lower `NumEntries()/2` entries) stays in `oldPage`; the larger half moves to a newly allocated page.

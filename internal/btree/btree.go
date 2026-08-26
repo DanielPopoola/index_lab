@@ -52,17 +52,7 @@ func (t *BTree) Close() error {
 	return t.pm.Close()
 }
 
-// Walks root-to-leaf, following child pointers through however many internal-page levels exist.
-// Thin wrapper over `findLeafWithPath` that discards the ancestor path.
-func (t *BTree) findLeaf(encodedKey []byte) (*page.Page, error) {
-	leaf, _, err := t.findLeafWithPath(encodedKey)
-	if err != nil {
-		return nil, err
-	}
-	return leaf, nil
-}
-
-// Same traversal as `findLeaf`, additionally returning `ancestors`:
+// Walks root-to-leaf, following child pointers through however many internal-page levels exist., additionally returning `ancestors`:
 // every internal page visited on the way down, in top-down order (root first, immediate parent of the leaf last).
 func (t *BTree) findLeafWithPath(encodedKey []byte) (leaf *page.Page, ancestors []page.PageID, err error) {
 	p, err := t.pm.ReadPage(t.rootID)
@@ -131,12 +121,28 @@ func (t *BTree) Insert(key int64, recordID int64) error {
 func (t *BTree) Search(key int64) (recordID int64, found bool) {
 	encodedKey := EncodeInt64(key)
 
-	leaf, err := t.findLeaf(encodedKey)
+	leaf, _, err := t.findLeafWithPath(encodedKey)
 	if err != nil {
 		return 0, false
 	}
 
 	return Search(leaf, key)
+}
+
+// Deletes `key`. Does not yet check or fix underflow — that's the next
+// layer to add once this leaf-only version is proven correct.
+func (t *BTree) Delete(key int64) error {
+	encodedKey := EncodeInt64(key)
+
+	leaf, _, err := t.findLeafWithPath(encodedKey)
+	if err != nil {
+		return err
+	}
+
+	if err := Delete(leaf, key); err != nil {
+		return err
+	}
+	return t.pm.WritePage(leaf)
 }
 
 // Wires an already-completed split into the tree structure.
@@ -173,7 +179,7 @@ func (t *BTree) propagateSplit(p, newPage *page.Page, separatorKey []byte, ances
 	entryBytes := append(append([]byte{}, separatorKey...), encodeChildID(newPage.ID)...)
 
 	if parent.HasSpaceFor(len(entryBytes)) {
-		idx, _ := findInsertIndex(parent, separatorKey)
+		idx, _ := findKeyIndex(parent, separatorKey)
 		parent.InsertEntry(idx, entryBytes)
 		return t.pm.WritePage(parent)
 	}
@@ -192,10 +198,10 @@ func (t *BTree) propagateSplit(p, newPage *page.Page, separatorKey []byte, ances
 	// Decide which half of the split parent should receive
 	// (separatorKey, newPage.ID), same idea as the leaf case in Insert.
 	if CompareKeys(separatorKey, parentSeparator) >= 0 {
-		idx, _ := findInsertIndex(newParent, separatorKey)
+		idx, _ := findKeyIndex(newParent, separatorKey)
 		newParent.InsertEntry(idx, entryBytes)
 	} else {
-		idx, _ := findInsertIndex(parent, separatorKey)
+		idx, _ := findKeyIndex(parent, separatorKey)
 		parent.InsertEntry(idx, entryBytes)
 	}
 

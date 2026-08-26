@@ -8,6 +8,7 @@ const (
 	PageSize   = 4096 // fixed size of every page on disk, in bytes
 	HeaderSize = 21   // bytes reserved at the start of every page for the header
 	SlotSize   = 4    // bytes per slot array entry
+	EntrySize  = 16   // bytes per entry: 8-byte key + 8-byte value/childID (true for both leaf and internal entries)
 )
 
 type PageType uint8
@@ -167,6 +168,19 @@ func (p *Page) HasSpaceFor(entryLen int) bool {
 
 	available := int(right) - int(left)
 	return available >= int(SlotSize)+entryLen
+}
+
+// MaxEntries returns the maximum number of fixed-size entries
+func MaxEntries() int {
+	return (PageSize - HeaderSize) / (SlotSize + EntrySize)
+}
+
+// MinEntries returns the minimum number of entries a non-root page must
+// hold to satisfy the B+ tree's occupancy invariant ("at least half
+// full"). The root page is exempt from this rule — callers must check
+// for that separately.
+func MinEntries() int {
+	return MaxEntries() / 2
 }
 
 // Inserts `entryBytes` as a new entry, placing its slot at sorted position `slotIndex`.
