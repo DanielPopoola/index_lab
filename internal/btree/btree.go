@@ -52,27 +52,6 @@ func (t *BTree) Close() error {
 	return t.pm.Close()
 }
 
-// Walks root-to-leaf, following child pointers through however many internal-page levels exist., additionally returning `ancestors`:
-// every internal page visited on the way down, in top-down order (root first, immediate parent of the leaf last).
-func (t *BTree) findLeafWithPath(encodedKey []byte) (leaf *page.Page, ancestors []page.PageID, err error) {
-	p, err := t.pm.ReadPage(t.rootID)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	for p.PageType() == page.InternalPage {
-		ancestors = append(ancestors, p.ID)
-
-		childID := findChildPageID(p, encodedKey)
-		p, err = t.pm.ReadPage(childID)
-		if err != nil {
-			return nil, nil, err
-		}
-	}
-
-	return p, ancestors, nil
-}
-
 // Inserts `(key, recordID)`.
 func (t *BTree) Insert(key int64, recordID int64) error {
 	encodedKey := EncodeInt64(key)
@@ -129,12 +108,11 @@ func (t *BTree) Search(key int64) (recordID int64, found bool) {
 	return Search(leaf, key)
 }
 
-// Deletes `key`. Does not yet check or fix underflow — that's the next
-// layer to add once this leaf-only version is proven correct.
+// Deletes `key`.
 func (t *BTree) Delete(key int64) error {
 	encodedKey := EncodeInt64(key)
 
-	leaf, _, err := t.findLeafWithPath(encodedKey)
+	leaf, ancestors, err := t.findLeafWithPath(encodedKey)
 	if err != nil {
 		return err
 	}
@@ -142,7 +120,162 @@ func (t *BTree) Delete(key int64) error {
 	if err := Delete(leaf, key); err != nil {
 		return err
 	}
-	return t.pm.WritePage(leaf)
+
+	if len(ancestors) == 0 {
+		return t.pm.WritePage(leaf)
+	}
+
+	if leaf.NumEntries() >= page.MinEntries() {
+		return t.pm.WritePage(leaf)
+	}
+
+	return t.fixLeafUnderflow(leaf, ancestors)
+}
+
+// Walks root-to-leaf, following child pointers through however many internal-page levels exist., additionally returning `ancestors`:
+// every internal page visited on the way down, in top-down order (root first, immediate parent of the leaf last).
+func (t *BTree) findLeafWithPath(encodedKey []byte) (leaf *page.Page, ancestors []page.PageID, err error) {
+	p, err := t.pm.ReadPage(t.rootID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	for p.PageType() == page.InternalPage {
+		ancestors = append(ancestors, p.ID)
+
+		childID := findChildPageID(p, encodedKey)
+		p, err = t.pm.ReadPage(childID)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	return p, ancestors, nil
+}
+
+// Called when `leaf` has dropped below MinEntries() after a delete and
+// is not the root. Loads whichever siblings exist, then decides:
+// redistribute (cheaper, tried first) or merge (fallback when no
+// sibling has spare capacity).
+//
+// ancestors is the top-down path from findLeafWithPath; the immediate
+// parent is ancestors[len(ancestors)-1].
+//
+// For now this stops the cascade at the parent: if removing the dead
+// child's entry from the parent leaves the PARENT underflowing too,
+// this function still writes the parent as-is and returns — the
+// parent-level cascade is the next layer to add on top of this one.
+func (t *BTree) fixLeafUnderflow(leaf *page.Page, ancestors []page.PageID) error {
+	parent, err := t.pm.ReadPage(ancestors[len(ancestors)-1])
+	if err != nil {
+		return err
+	}
+
+	var leftPage, rightPage *page.Page
+	if leaf.PrevLeafPageID() != 0 {
+		leftPage, err = t.pm.ReadPage(leaf.PrevLeafPageID())
+		if err != nil {
+			return err
+		}
+	}
+	if leaf.NextLeafPageID() != 0 {
+		rightPage, err = t.pm.ReadPage(leaf.NextLeafPageID())
+		if err != nil {
+			return err
+		}
+	}
+
+	if leftPage != nil && leftPage.NumEntries() > page.MinEntries() {
+		return t.redistributeLeafFromLeft(leaf, leftPage, parent)
+	}
+	if rightPage != nil && rightPage.NumEntries() > page.MinEntries() {
+		return t.redistributeLeafFromRight(leaf, rightPage, parent)
+	}
+	if leftPage != nil {
+		return t.mergeLeafWithLeft(leaf, leftPage, parent)
+	}
+	return t.mergeLeafWithRight(leaf, rightPage, parent)
+}
+
+// Borrows one entry from leaf's left sibling and updates the parent's
+// separator entry for leaf accordingly.
+func (t *BTree) redistributeLeafFromLeft(leaf, leftPage, parent *page.Page) error {
+	newSeparator := redistributeFromLeft(leaf, leftPage)
+	idx, _ := findChildIndex(parent, leaf.ID)
+	parent.DeleteEntry(idx)
+	entryBytes := append(append([]byte{}, newSeparator...), encodeChildID(leaf.ID)...)
+	parent.InsertEntry(idx, entryBytes)
+
+	if err := t.pm.WritePage(leaf); err != nil {
+		return err
+	}
+	if err := t.pm.WritePage(leftPage); err != nil {
+		return err
+	}
+	return t.pm.WritePage(parent)
+}
+
+// Borrows one entry from leaf's right sibling and updates the parent's
+// separator entry for rightPage accordingly (not leaf — see the
+// asymmetry noted on redistributeFromRight).
+func (t *BTree) redistributeLeafFromRight(leaf, rightPage, parent *page.Page) error {
+	newSeparator := redistributeFromRight(leaf, rightPage)
+	idx, _ := findChildIndex(parent, rightPage.ID)
+	parent.DeleteEntry(idx)
+	entryBytes := append(append([]byte{}, newSeparator...), encodeChildID(rightPage.ID)...)
+	parent.InsertEntry(idx, entryBytes)
+
+	if err := t.pm.WritePage(leaf); err != nil {
+		return err
+	}
+	if err := t.pm.WritePage(rightPage); err != nil {
+		return err
+	}
+	return t.pm.WritePage(parent)
+}
+
+// Merges leaf into its left sibling. leftPage survives (absorbs leaf's
+// entries); leaf is discarded. Patches the third page (whatever now
+// sits after leftPage in the chain) if one exists, then removes leaf's
+// now-meaningless entry from the parent.
+func (t *BTree) mergeLeafWithLeft(leaf, leftPage, parent *page.Page) error {
+	mergeLeaf(leftPage, leaf)
+	if leftPage.NextLeafPageID() != 0 {
+		rightPage, err := t.pm.ReadPage(leftPage.NextLeafPageID())
+		if err != nil {
+			return err
+		}
+		rightPage.SetPrevLeafPageID(leftPage.ID)
+		if err := t.pm.WritePage(rightPage); err != nil {
+			return err
+		}
+	}
+	idx, _ := findChildIndex(parent, leaf.ID)
+	parent.DeleteEntry(idx)
+	if err := t.pm.WritePage(leftPage); err != nil {
+		return err
+	}
+	return t.pm.WritePage(parent)
+}
+
+func (t *BTree) mergeLeafWithRight(leaf, rightPage, parent *page.Page) error {
+	mergeLeaf(leaf, rightPage)
+	if leaf.NextLeafPageID() != 0 {
+		extraPage, err := t.pm.ReadPage(leaf.NextLeafPageID())
+		if err != nil {
+			return err
+		}
+		extraPage.SetPrevLeafPageID(leaf.ID)
+		if err := t.pm.WritePage(extraPage); err != nil {
+			return err
+		}
+	}
+	idx, _ := findChildIndex(parent, rightPage.ID)
+	parent.DeleteEntry(idx)
+	if err := t.pm.WritePage(leaf); err != nil {
+		return err
+	}
+	return t.pm.WritePage(parent)
 }
 
 // Wires an already-completed split into the tree structure.

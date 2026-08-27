@@ -12,8 +12,8 @@ import (
 	"github.com/DanielPopoola/index_lab/internal/page"
 )
 
-// Returned by the package-level `Insert` when a single page has no room for a new entry.
 var ErrPageFull = errors.New("page full: splitting not yet implemented")
+var ErrKeyNotFound = errors.New("key not found")
 
 // Binary search over `p`'s sorted entries for `targetKey`, comparing the first 8 bytes of each entry.
 // Works on both leaf and internal pages (both store the key as the first 8 bytes of every entry).
@@ -48,6 +48,24 @@ func findChildPageID(p *page.Page, targetKey []byte) page.PageID {
 	return page.PageID(childID)
 }
 
+// Finds which entry index in internal page `p` has a child pointer matching
+// `childID`.
+func findChildIndex(p *page.Page, childID page.PageID) (index uint16, found bool) {
+	if p.LeftmostChildPageID() == childID {
+		return p.NumEntries(), true
+	}
+
+	for i := uint16(0); i < p.NumEntries(); i++ {
+		childBytes := p.GetEntry(i)[8:]
+		pageID := page.PageID(binary.BigEndian.Uint64(childBytes))
+		if pageID == childID {
+			return i, true
+		}
+	}
+	return 0, false
+
+}
+
 // Inserts `(key, recordID)` into `p` directly. Returns `ErrPageFull` if `p` has no room — does not split.
 func Insert(p *page.Page, key int64, recordID int64) error {
 	encodedKey := EncodeInt64(key)
@@ -74,9 +92,6 @@ func Search(p *page.Page, key int64) (recordID int64, found bool) {
 	value := DecodeInt64(valueBytes)
 	return value, true
 }
-
-// Returned by the package-level `Delete` when `key` is not present on `p`.
-var ErrKeyNotFound = errors.New("key not found")
 
 // Deletes `key` from `p` directly. Does not traverse the tree and does
 // not check or fix underflow — that's the caller's (BTree.Delete's)
@@ -120,6 +135,22 @@ func redistributeFromRight(underflowing, rightSibling *page.Page) (newSeparator 
 	underflowing.InsertEntry(underflowing.NumEntries(), entry)
 
 	return rightSibling.GetEntry(0)[:8]
+}
+
+// Merges `right` into `left`. `left` must hold smaller keys than
+// `right` (i.e. left is right's PrevLeafPageID in the tree's leaf
+// chain). After this call, `left` holds every entry from both pages;
+// `right` is empty and its page is the caller's responsibility to
+// remove from the tree (delete its parent entry, free its PageID).
+func mergeLeaf(left, right *page.Page) {
+	for i := uint16(0); i < right.NumEntries(); i++ {
+		left.InsertEntry(left.NumEntries(), right.GetEntry(i))
+	}
+
+	left.SetNextLeafPageID(right.NextLeafPageID())
+	for i := int(right.NumEntries()) - 1; i >= 0; i-- {
+		right.DeleteEntry(uint16(i))
+	}
 }
 
 // Splits a full leaf page. The smaller half (lower `NumEntries()/2` entries) stays in `oldPage`; the larger half moves to a newly allocated page.

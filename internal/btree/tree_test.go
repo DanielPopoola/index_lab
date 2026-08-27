@@ -229,6 +229,122 @@ func TestRedistributeFromRight(t *testing.T) {
 	}
 }
 
+func TestMergeLeaf(t *testing.T) {
+	// Three-leaf chain: left <-> right <-> rightsRight.
+	// left and right are the two pages being merged; rightsRight
+	// stands in for the "third page" whose PrevLeafPageID a real
+	// caller would need to patch after this call (mergeLeaf itself
+	// doesn't touch rightsRight — it only has left/right in hand).
+	left := page.NewLeafPage(0)
+	right := page.NewLeafPage(1)
+	rightsRight := page.NewLeafPage(2)
+
+	leftEntries := []struct{ key, recordID int64 }{
+		{10, 100},
+		{20, 200},
+	}
+	rightEntries := []struct{ key, recordID int64 }{
+		{30, 300},
+		{40, 400},
+	}
+
+	for _, e := range leftEntries {
+		if err := Insert(left, e.key, e.recordID); err != nil {
+			t.Fatalf("Insert(%d) failed: %v", e.key, err)
+		}
+	}
+	for _, e := range rightEntries {
+		if err := Insert(right, e.key, e.recordID); err != nil {
+			t.Fatalf("Insert(%d) failed: %v", e.key, err)
+		}
+	}
+
+	// Wire up the chain as it would exist in a real tree before the merge.
+	left.SetNextLeafPageID(right.ID)
+	right.SetPrevLeafPageID(left.ID)
+	right.SetNextLeafPageID(rightsRight.ID)
+	rightsRight.SetPrevLeafPageID(right.ID)
+
+	mergeLeaf(left, right)
+
+	// left should now hold all four entries, in order.
+	if left.NumEntries() != 4 {
+		t.Fatalf("left.NumEntries() = %d, want 4", left.NumEntries())
+	}
+	allEntries := append(append([]struct{ key, recordID int64 }{}, leftEntries...), rightEntries...)
+	for _, e := range allEntries {
+		gotRecordID, found := Search(left, e.key)
+		if !found {
+			t.Errorf("Search(left, %d): expected found=true, got false", e.key)
+			continue
+		}
+		if gotRecordID != e.recordID {
+			t.Errorf("Search(left, %d): recordID = %d, want %d", e.key, gotRecordID, e.recordID)
+		}
+	}
+
+	// right should now be empty.
+	if right.NumEntries() != 0 {
+		t.Fatalf("right.NumEntries() = %d, want 0 (right should be empty after merge)", right.NumEntries())
+	}
+
+	// left's chain pointer should now skip over right, pointing
+	// straight at rightsRight. This is what a real caller reads to
+	// know there's a third page needing its PrevLeafPageID patched.
+	if left.NextLeafPageID() != rightsRight.ID {
+		t.Errorf("left.NextLeafPageID() = %d, want %d (rightsRight)", left.NextLeafPageID(), rightsRight.ID)
+	}
+}
+
+func TestFindChildIndex(t *testing.T) {
+	// Internal page: leftmost=P1, entry0={key=30,child=P2}, entry1={key=60,child=P3}.
+	leftmost := page.PageID(1)
+	child2 := page.PageID(2)
+	child3 := page.PageID(3)
+	noSuchChild := page.PageID(99)
+
+	p := page.NewInternalPage(0, leftmost)
+
+	entry0 := append(EncodeInt64(30), encodeChildID(child2)...)
+	p.InsertEntry(p.NumEntries(), entry0)
+
+	entry1 := append(EncodeInt64(60), encodeChildID(child3)...)
+	p.InsertEntry(p.NumEntries(), entry1)
+
+	// Matches a real entry.
+	idx, found := findChildIndex(p, child2)
+	if !found {
+		t.Errorf("findChildIndex(child2): expected found=true, got false")
+	}
+	if idx != 0 {
+		t.Errorf("findChildIndex(child2): index = %d, want 0", idx)
+	}
+
+	idx, found = findChildIndex(p, child3)
+	if !found {
+		t.Errorf("findChildIndex(child3): expected found=true, got false")
+	}
+	if idx != 1 {
+		t.Errorf("findChildIndex(child3): index = %d, want 1", idx)
+	}
+
+	// Matches the leftmost pointer, not a real entry — sentinel index
+	// should be NumEntries(), not 0.
+	idx, found = findChildIndex(p, leftmost)
+	if !found {
+		t.Errorf("findChildIndex(leftmost): expected found=true, got false")
+	}
+	if idx != p.NumEntries() {
+		t.Errorf("findChildIndex(leftmost): index = %d, want %d (NumEntries sentinel)", idx, p.NumEntries())
+	}
+
+	// Matches nothing.
+	_, found = findChildIndex(p, noSuchChild)
+	if found {
+		t.Errorf("findChildIndex(noSuchChild): expected found=false, got true")
+	}
+}
+
 func TestSplitLeaf(t *testing.T) {
 	oldPage := page.NewLeafPage(0)
 
