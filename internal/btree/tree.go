@@ -12,8 +12,8 @@ import (
 	"github.com/DanielPopoola/index_lab/internal/page"
 )
 
+// Returned by the package-level `Insert` when a single page has no room for a new entry.
 var ErrPageFull = errors.New("page full: splitting not yet implemented")
-var ErrKeyNotFound = errors.New("key not found")
 
 // Binary search over `p`'s sorted entries for `targetKey`, comparing the first 8 bytes of each entry.
 // Works on both leaf and internal pages (both store the key as the first 8 bytes of every entry).
@@ -75,7 +75,12 @@ func Search(p *page.Page, key int64) (recordID int64, found bool) {
 	return value, true
 }
 
-// Deletes `key` from `p` directly
+// Returned by the package-level `Delete` when `key` is not present on `p`.
+var ErrKeyNotFound = errors.New("key not found")
+
+// Deletes `key` from `p` directly. Does not traverse the tree and does
+// not check or fix underflow — that's the caller's (BTree.Delete's)
+// responsibility once this is wired into the tree.
 func Delete(p *page.Page, key int64) error {
 	encodedKey := EncodeInt64(key)
 	index, ok := findKeyIndex(p, encodedKey)
@@ -84,6 +89,37 @@ func Delete(p *page.Page, key int64) error {
 	}
 	p.DeleteEntry(index)
 	return nil
+}
+
+// Borrows exactly one entry from `leftSibling` to fix `underflowing`'s
+// occupancy. Moves `leftSibling`'s LAST (largest-key) entry into
+// `underflowing` — the only entry that can move while keeping both
+// pages sorted and keeping every key in `leftSibling` still smaller
+// than every key in `underflowing`.
+func redistributeFromLeft(underflowing, leftSibling *page.Page) (newSeparator []byte) {
+	lastIdx := leftSibling.NumEntries() - 1
+	entry := leftSibling.GetEntry(lastIdx)
+
+	leftSibling.DeleteEntry(lastIdx)
+
+	underflowing.InsertEntry(0, entry)
+
+	return entry[:8]
+}
+
+// Borrows exactly one entry from `rightSibling` to fix `underflowing`'s
+// occupancy. Moves `rightSibling`'s FIRST (smallest-key) entry into
+// `underflowing` — the only entry that can move while keeping both
+// pages sorted and keeping every key in `rightSibling` still larger
+// than every key in `underflowing`.
+func redistributeFromRight(underflowing, rightSibling *page.Page) (newSeparator []byte) {
+	entry := rightSibling.GetEntry(0)
+
+	rightSibling.DeleteEntry(0)
+
+	underflowing.InsertEntry(underflowing.NumEntries(), entry)
+
+	return rightSibling.GetEntry(0)[:8]
 }
 
 // Splits a full leaf page. The smaller half (lower `NumEntries()/2` entries) stays in `oldPage`; the larger half moves to a newly allocated page.

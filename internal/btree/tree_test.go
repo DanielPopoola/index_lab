@@ -95,6 +95,140 @@ func TestDelete(t *testing.T) {
 	}
 }
 
+func TestRedistributeFromLeft(t *testing.T) {
+	// Set up two adjacent leaves: leftSibling holds smaller keys,
+	// underflowing holds larger keys. leftSibling has entries to
+	// spare; underflowing does not (that's what makes it
+	// "underflowing" in this scenario).
+	leftSibling := page.NewLeafPage(0)
+	underflowing := page.NewLeafPage(1)
+
+	leftEntries := []struct{ key, recordID int64 }{
+		{10, 100},
+		{20, 200},
+		{30, 300},
+	}
+
+	rightEntries := []struct{ key, recordID int64 }{
+		{50, 500},
+		{60, 600},
+	}
+
+	for _, e := range leftEntries {
+		if err := Insert(leftSibling, e.key, e.recordID); err != nil {
+			t.Fatalf("Insert(%d) failed: %v", e.key, err)
+		}
+	}
+
+	for _, e := range rightEntries {
+		if err := Insert(underflowing, e.key, e.recordID); err != nil {
+			t.Fatalf("Insert(%d) failed: %v", e.key, err)
+		}
+	}
+
+	newSeparator := redistributeFromLeft(underflowing, leftSibling)
+
+	if leftSibling.NumEntries() != 2 {
+		t.Fatalf("leftSibling.NumEntries() = %d, want 2", leftSibling.NumEntries())
+	}
+	if _, ok := Search(leftSibling, 30); ok {
+		t.Errorf("Search(leftSibling, 30): expected found=false, got true")
+	}
+
+	if underflowing.NumEntries() != 3 {
+		t.Fatalf("underflowing.NumEntries() = %d, want 3", underflowing.NumEntries())
+	}
+	gotRecordID, found := Search(underflowing, 30)
+	if !found {
+		t.Errorf("Search(underflowing, 30): expected found=true, got false")
+	}
+	if gotRecordID != 300 {
+		t.Errorf("Search(underflowing, 30): recordID = %d, want 300", gotRecordID)
+	}
+
+	if !bytes.Equal(newSeparator, EncodeInt64(30)) {
+		t.Errorf("newSeparator = %x, want %x", newSeparator, EncodeInt64(30))
+	}
+
+	// Sanity check: the move didn't disturb entries already there.
+	for _, e := range rightEntries {
+		gotRecordID, found := Search(underflowing, e.key)
+		if !found {
+			t.Errorf("Search(underflowing, %d): expected found=true, got false", e.key)
+			continue
+		}
+		if gotRecordID != e.recordID {
+			t.Errorf("Search(underflowing, %d): recordID = %d, want %d", e.key, gotRecordID, e.recordID)
+		}
+	}
+}
+
+func TestRedistributeFromRight(t *testing.T) {
+	underflowing := page.NewLeafPage(0)
+	rightSibling := page.NewLeafPage(1)
+
+	leftEntries := []struct{ key, recordID int64 }{
+		{10, 100},
+		{20, 200},
+	}
+
+	rightEntries := []struct{ key, recordID int64 }{
+		{30, 300},
+		{40, 400},
+		{50, 500},
+	}
+
+	for _, e := range leftEntries {
+		if err := Insert(underflowing, e.key, e.recordID); err != nil {
+			t.Fatalf("Insert(%d) failed: %v", e.key, err)
+		}
+	}
+
+	for _, e := range rightEntries {
+		if err := Insert(rightSibling, e.key, e.recordID); err != nil {
+			t.Fatalf("Insert(%d) failed: %v", e.key, err)
+		}
+	}
+
+	newSeparator := redistributeFromRight(underflowing, rightSibling)
+
+	if rightSibling.NumEntries() != 2 {
+		t.Fatalf("rightSibling.NumEntries() = %d, want 2", rightSibling.NumEntries())
+	}
+	if _, ok := Search(rightSibling, 30); ok {
+		t.Errorf("Search(rightSibling, 30): expected found=false, got true")
+	}
+
+	if underflowing.NumEntries() != 3 {
+		t.Fatalf("underflowing.NumEntries() = %d, want 3", underflowing.NumEntries())
+	}
+	gotRecordID, found := Search(underflowing, 30)
+	if !found {
+		t.Errorf("Search(underflowing, 30): expected found=true, got false")
+	}
+	if gotRecordID != 300 {
+		t.Errorf("Search(underflowing, 30): recordID = %d, want 300", gotRecordID)
+	}
+
+	// Asymmetric case: the separator is rightSibling's NEW smallest
+	// key (40), not the key that moved (30).
+	if !bytes.Equal(newSeparator, EncodeInt64(40)) {
+		t.Errorf("newSeparator = %x, want %x", newSeparator, EncodeInt64(40))
+	}
+
+	// Sanity check: the move didn't disturb entries already there.
+	for _, e := range leftEntries {
+		gotRecordID, found := Search(underflowing, e.key)
+		if !found {
+			t.Errorf("Search(underflowing, %d): expected found=true, got false", e.key)
+			continue
+		}
+		if gotRecordID != e.recordID {
+			t.Errorf("Search(underflowing, %d): recordID = %d, want %d", e.key, gotRecordID, e.recordID)
+		}
+	}
+}
+
 func TestSplitLeaf(t *testing.T) {
 	oldPage := page.NewLeafPage(0)
 
