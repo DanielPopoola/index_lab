@@ -1,6 +1,7 @@
 package btree
 
 import (
+	"math/rand"
 	"path/filepath"
 	"testing"
 
@@ -290,5 +291,128 @@ func TestDeleteTriggersMultiLevelCascade(t *testing.T) {
 		t.Errorf("Search(%d) after reopen: expected found=true, got false", numKeys-1)
 	} else if gotRecordID != (numKeys-1)*10 {
 		t.Errorf("Search(%d) after reopen: recordID = %d, want %d", numKeys-1, gotRecordID, (numKeys-1)*10)
+	}
+}
+
+func TestLeafChainCorrectAfterNonSequentialInserts(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	tree, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer tree.Close()
+
+	const numKeys = 5000
+
+	keys := make([]int64, numKeys)
+	for i := range keys {
+		keys[i] = int64(i)
+	}
+	rand.Shuffle(len(keys), func(i, j int) {
+		keys[i], keys[j] = keys[j], keys[i]
+	})
+
+	for _, k := range keys {
+		if err := tree.Insert(k, k*10); err != nil {
+			t.Fatalf("Insert(%d) failed: %v", k, err)
+		}
+	}
+
+	// Confirm this actually built a multi-page tree — otherwise the
+	// test isn't exercising anything interesting.
+	rootPage, err := tree.pm.ReadPage(tree.rootID)
+	if err != nil {
+		t.Fatalf("ReadPage(root) failed: %v", err)
+	}
+	if rootPage.PageType() != page.InternalPage {
+		t.Fatalf("setup problem: expected root to be InternalPage after %d shuffled inserts, got PageType=%v", numKeys, rootPage.PageType())
+	}
+
+	// Walk down the tree's leftmost spine to find the leftmost leaf —
+	// the correct starting point for a forward walk of the leaf chain.
+	current := rootPage
+	for current.PageType() != page.LeafPage {
+		current, err = tree.pm.ReadPage(current.LeftmostChildPageID())
+		if err != nil {
+			t.Fatalf("ReadPage while descending to leftmost leaf failed: %v", err)
+		}
+	}
+	leftmostLeaf := current
+
+	// Forward walk: collect every key from every leaf via
+	// NextLeafPageID, and confirm strictly ascending order end to end
+	// — the real proof that splits wired the chain correctly
+	// regardless of where in the tree they happened.
+	var gotKeys []int64
+	leaf := leftmostLeaf
+	for {
+		for i := uint16(0); i < leaf.NumEntries(); i++ {
+			entry := leaf.GetEntry(i)
+			key := DecodeInt64(entry[:8])
+			gotKeys = append(gotKeys, key)
+		}
+		if leaf.NextLeafPageID() == 0 {
+			break
+		}
+		leaf, err = tree.pm.ReadPage(leaf.NextLeafPageID())
+		if err != nil {
+			t.Fatalf("ReadPage while walking leaf chain forward failed: %v", err)
+		}
+	}
+
+	if len(gotKeys) != numKeys {
+		t.Fatalf("leaf chain walk found %d keys, want %d", len(gotKeys), numKeys)
+	}
+	for i := 1; i < len(gotKeys); i++ {
+		if gotKeys[i] <= gotKeys[i-1] {
+			t.Fatalf("leaf chain out of order at position %d: %d <= %d", i, gotKeys[i], gotKeys[i-1])
+		}
+	}
+	if gotKeys[0] != 0 || gotKeys[len(gotKeys)-1] != numKeys-1 {
+		t.Fatalf("leaf chain endpoints wrong: first=%d last=%d, want first=0 last=%d", gotKeys[0], gotKeys[len(gotKeys)-1], numKeys-1)
+	}
+
+	// Backward walk: starting from the LAST leaf reached above,
+	// follow PrevLeafPageID back to the start. If any leaf's Prev
+	// pointer is stale or wrong, this walk either breaks early,
+	// loops, or lands somewhere other than leftmostLeaf.
+	var backKeys []int64
+	back := leaf // the last leaf from the forward walk (NextLeafPageID == 0)
+	visited := make(map[page.PageID]bool)
+	for {
+		if visited[back.ID] {
+			t.Fatalf("backward walk revisited PageID %d — Prev pointers form a cycle", back.ID)
+		}
+		visited[back.ID] = true
+
+		for i := int(back.NumEntries()) - 1; i >= 0; i-- {
+			entry := back.GetEntry(uint16(i))
+			key := DecodeInt64(entry[:8])
+			backKeys = append(backKeys, key)
+		}
+		if back.PrevLeafPageID() == 0 {
+			break
+		}
+		back, err = tree.pm.ReadPage(back.PrevLeafPageID())
+		if err != nil {
+			t.Fatalf("ReadPage while walking leaf chain backward failed: %v", err)
+		}
+	}
+
+	if back.ID != leftmostLeaf.ID {
+		t.Fatalf("backward walk ended at PageID %d, want %d (leftmostLeaf) — Prev chain is broken", back.ID, leftmostLeaf.ID)
+	}
+	if len(backKeys) != numKeys {
+		t.Fatalf("backward walk found %d keys, want %d", len(backKeys), numKeys)
+	}
+	// backKeys was collected leaf-by-leaf in reverse, each leaf's own
+	// entries also read in reverse — so backKeys should be gotKeys
+	// exactly reversed.
+	for i := range backKeys {
+		want := gotKeys[len(gotKeys)-1-i]
+		if backKeys[i] != want {
+			t.Fatalf("backward walk key mismatch at position %d: got %d, want %d", i, backKeys[i], want)
+		}
 	}
 }

@@ -76,6 +76,9 @@ func (t *BTree) Insert(key int64, recordID int64) error {
 	if err != nil {
 		return err
 	}
+	if err := t.updateNextLeafPrevLink(newLeaf); err != nil {
+		return err
+	}
 
 	if CompareKeys(encodedKey, separatorKey) >= 0 {
 		err = Insert(newLeaf, key, recordID)
@@ -285,6 +288,25 @@ func (t *BTree) mergeLeafWithRight(leaf, rightPage, parent *page.Page, ancestors
 	return t.finishInternalMerge(parent, ancestors)
 }
 
+// updateNextLeafPrevLink repairs the backward pointer of the leaf that
+// follows newLeaf. splitLeaf can update oldPage.Next and newLeaf.Prev, but
+// it cannot persist the existing next leaf because it does not own the page
+// manager. Without this update, forward walks work while backward walks skip
+// leaves inserted before an existing middle leaf.
+func (t *BTree) updateNextLeafPrevLink(newLeaf *page.Page) error {
+	nextID := newLeaf.NextLeafPageID()
+	if nextID == 0 {
+		return nil
+	}
+
+	nextLeaf, err := t.pm.ReadPage(nextID)
+	if err != nil {
+		return err
+	}
+	nextLeaf.SetPrevLeafPageID(newLeaf.ID)
+	return t.pm.WritePage(nextLeaf)
+}
+
 // Called when an internal page `node` has dropped below MinEntries()
 // (or, if node is the root, when it's been reduced to a single child)
 // after a parent-entry removal further down the tree. Mirrors
@@ -490,6 +512,9 @@ func (t *BTree) propagateSplit(p, newPage *page.Page, separatorKey []byte, ances
 		parentSeparator, newParent, err = splitInternal(parent, t.pm.AllocatePage)
 	} else {
 		parentSeparator, newParent, err = splitLeaf(parent, t.pm.AllocatePage)
+		if err == nil {
+			err = t.updateNextLeafPrevLink(newParent)
+		}
 	}
 	if err != nil {
 		return err
