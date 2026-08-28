@@ -3,9 +3,13 @@
 package btree
 
 import (
+	"errors"
+
 	"github.com/DanielPopoola/index_lab/internal/page"
 	"github.com/DanielPopoola/index_lab/internal/storage"
 )
+
+var ErrInvalidRange = errors.New("start key must be less than end key")
 
 // Persistent B+ tree backed by a single database file.
 // Wraps a `*storage.PageManager` and tracks the current root `PageID`.
@@ -109,6 +113,66 @@ func (t *BTree) Search(key int64) (recordID int64, found bool) {
 	}
 
 	return Search(leaf, key)
+}
+
+// ScanResult is one (key, recordID) pair returned by Scan.
+type ScanResult struct {
+	Key      int64
+	RecordID int64
+}
+
+// Scan returns every (key, recordID) pair with startKey <= key <= endKey,
+// in ascending key order.
+//
+// Approach:
+//  1. Find the leaf that would contain startKey (same descent as Search).
+//  2. Within that leaf, find the first entry >= startKey.
+//  3. Walk forward entry-by-entry, collecting each one whose key <= endKey.
+//  4. When the current leaf runs out of entries, follow NextLeafPageID to
+//     the next leaf and keep going — UNLESS the leaf chain has ended
+//     (NextLeafPageID == 0) or the last entry read already exceeded endKey.
+func (t *BTree) Scan(startKey, endKey int64) ([]ScanResult, error) {
+	if startKey > endKey {
+		return nil, ErrInvalidRange
+	}
+
+	encodedStart := EncodeInt64(startKey)
+
+	leaf, _, err := t.findLeafWithPath(encodedStart)
+	if err != nil {
+		return nil, err
+	}
+
+	var results []ScanResult
+
+	idx, _ := findKeyIndex(leaf, encodedStart)
+
+	for {
+		for idx < leaf.NumEntries() {
+			entry := leaf.GetEntry(idx)
+			key := DecodeInt64(entry[:8])
+			if key > endKey {
+				return results, nil
+			}
+
+			results = append(results, ScanResult{
+				Key:      key,
+				RecordID: DecodeInt64(entry[8:]),
+			})
+			idx++
+		}
+
+		nextID := leaf.NextLeafPageID()
+		if nextID == 0 {
+			return results, nil
+		}
+
+		leaf, err = t.pm.ReadPage(nextID)
+		if err != nil {
+			return nil, err
+		}
+		idx = 0
+	}
 }
 
 // Deletes `key`.

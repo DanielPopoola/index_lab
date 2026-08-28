@@ -416,3 +416,118 @@ func TestLeafChainCorrectAfterNonSequentialInserts(t *testing.T) {
 		}
 	}
 }
+
+func TestScan(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	tree, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer tree.Close()
+
+	// Enough keys to force at least one leaf split, so these tests
+	// actually exercise NextLeafPageID-following, not just a
+	// single-leaf linear scan. Even keys only (0, 2, 4, ...) so we can
+	// also test scanning across a gap (odd startKey/endKey values that
+	// don't exactly match a stored key).
+	const numKeys = 500
+	for i := int64(0); i < numKeys; i++ {
+		key := i * 2
+		if err := tree.Insert(key, key*10); err != nil {
+			t.Fatalf("Insert(%d) failed: %v", key, err)
+		}
+	}
+
+	rootPage, err := tree.pm.ReadPage(tree.rootID)
+	if err != nil {
+		t.Fatalf("ReadPage(root) failed: %v", err)
+	}
+	if rootPage.PageType() != page.InternalPage {
+		t.Fatalf("setup problem: expected a multi-page tree after %d inserts, got a single leaf root", numKeys)
+	}
+
+	// wantKeys returns every even key in [lo, hi], inclusive — the
+	// ground truth to compare Scan's output against.
+	wantKeys := func(lo, hi int64) []int64 {
+		var want []int64
+		for k := int64(0); k < numKeys*2; k += 2 {
+			if k >= lo && k <= hi {
+				want = append(want, k)
+			}
+		}
+		return want
+	}
+
+	checkScan := func(t *testing.T, startKey, endKey int64) {
+		t.Helper()
+		results, err := tree.Scan(startKey, endKey)
+		if err != nil {
+			t.Fatalf("Scan(%d, %d) failed: %v", startKey, endKey, err)
+		}
+
+		want := wantKeys(startKey, endKey)
+		if len(results) != len(want) {
+			t.Fatalf("Scan(%d, %d) returned %d results, want %d", startKey, endKey, len(results), len(want))
+		}
+		for i, r := range results {
+			if r.Key != want[i] {
+				t.Fatalf("Scan(%d, %d)[%d].Key = %d, want %d", startKey, endKey, i, r.Key, want[i])
+			}
+			if r.RecordID != r.Key*10 {
+				t.Errorf("Scan(%d, %d)[%d].RecordID = %d, want %d", startKey, endKey, i, r.RecordID, r.Key*10)
+			}
+		}
+	}
+
+	t.Run("mid-chain range spanning a leaf split", func(t *testing.T) {
+		// Comfortably inside the key space, wide enough to cross
+		// several leaf boundaries.
+		checkScan(t, 100, 300)
+	})
+
+	t.Run("range start and end fall between stored keys", func(t *testing.T) {
+		// Keys are all even; 101 and 299 don't exactly match any
+		// entry, exercising findKeyIndex's "insertion point" path
+		// and the key > endKey overshoot check.
+		checkScan(t, 101, 299)
+	})
+
+	t.Run("range starts before every key in the tree", func(t *testing.T) {
+		checkScan(t, -1000, 50)
+	})
+
+	t.Run("range ends after every key in the tree", func(t *testing.T) {
+		checkScan(t, numKeys*2-50, numKeys*2+1000)
+	})
+
+	t.Run("range covers the entire tree", func(t *testing.T) {
+		checkScan(t, -1000, numKeys*2+1000)
+	})
+
+	t.Run("single-point range on an existing key", func(t *testing.T) {
+		checkScan(t, 200, 200)
+	})
+
+	t.Run("single-point range on a missing key", func(t *testing.T) {
+		checkScan(t, 201, 201) // odd — never inserted
+	})
+
+	t.Run("range entirely outside the tree, above", func(t *testing.T) {
+		checkScan(t, numKeys*2+100, numKeys*2+200)
+	})
+
+	t.Run("range entirely outside the tree, below", func(t *testing.T) {
+		checkScan(t, -500, -100)
+	})
+
+	t.Run("invalid range returns ErrInvalidRange", func(t *testing.T) {
+		results, err := tree.Scan(50, 10)
+		if err != ErrInvalidRange {
+			t.Fatalf("Scan(50, 10) error = %v, want ErrInvalidRange", err)
+		}
+		if results != nil {
+			t.Fatalf("Scan(50, 10) results = %v, want nil", results)
+		}
+	})
+}
