@@ -1,4 +1,4 @@
-// tree.go: for now, this only handles operations on a SINGLE leaf page —
+// tree.go: forthis only handles operations on a SINGLE leaf page —
 // no internal nodes, no splitting yet. This is deliberately the smallest
 // possible "real" B+ tree operation: prove Insert/Search work correctly
 // before adding the complexity of multiple levels.
@@ -14,6 +14,51 @@ import (
 
 var ErrPageFull = errors.New("page full: splitting not yet implemented")
 var ErrKeyNotFound = errors.New("key not found")
+
+// Inserts `(key, recordID)` into `p` directly. Returns `ErrPageFull` if `p` has no room — does not split.
+func Insert(p *page.Page, key int64, recordID int64) error {
+	encodedKey := EncodeInt64(key)
+	entryBytes := append(encodedKey, EncodeInt64(recordID)...)
+
+	index, _ := findKeyIndex(p, encodedKey)
+
+	if !p.HasSpaceFor(len(entryBytes)) {
+		return ErrPageFull
+	}
+
+	p.InsertEntry(index, entryBytes)
+	return nil
+}
+
+// Looks up `key` on `p` directly. Does not traverse the tree.
+func Search(p *page.Page, key int64) (recordID int64, found bool) {
+	encodedKey := EncodeInt64(key)
+	index, ok := findKeyIndex(p, encodedKey)
+	if !ok {
+		return 0, false
+	}
+	valueBytes := p.GetEntry(index)[8:]
+	value := DecodeInt64(valueBytes)
+	return value, true
+}
+
+// Deletes `key` from `p` directly
+func Delete(p *page.Page, key int64) error {
+	encodedKey := EncodeInt64(key)
+	index, ok := findKeyIndex(p, encodedKey)
+	if !ok {
+		return ErrKeyNotFound
+	}
+	p.DeleteEntry(index)
+	return nil
+}
+
+// Encodes `id` as 8 big-endian bytes, for use as the value half of an internal-page entry.
+func encodeChildID(id page.PageID) []byte {
+	b := make([]byte, 8)
+	binary.BigEndian.PutUint64(b, uint64(id))
+	return b
+}
 
 // Binary search over `p`'s sorted entries for `targetKey`, comparing the first 8 bytes of each entry.
 // Works on both leaf and internal pages (both store the key as the first 8 bytes of every entry).
@@ -49,7 +94,15 @@ func findChildPageID(p *page.Page, targetKey []byte) page.PageID {
 }
 
 // Finds which entry index in internal page `p` has a child pointer matching
-// `childID`.
+// `childID`. Used after a merge, to find and remove the dead child's
+// entry from its parent.
+//
+// If `childID` matches p.LeftmostChildPageID() instead of any entry
+// (the leftmost child isn't stored in the entry array at all), returns
+// (p.NumEntries(), true) — a sentinel that can never collide with a
+// real entry index, since valid indices only go up to NumEntries()-1.
+// Callers must check for this case separately; it can't be removed
+// with DeleteEntry the way a normal entry can.
 func findChildIndex(p *page.Page, childID page.PageID) (index uint16, found bool) {
 	if p.LeftmostChildPageID() == childID {
 		return p.NumEntries(), true
@@ -63,47 +116,33 @@ func findChildIndex(p *page.Page, childID page.PageID) (index uint16, found bool
 		}
 	}
 	return 0, false
-
 }
 
-// Inserts `(key, recordID)` into `p` directly. Returns `ErrPageFull` if `p` has no room — does not split.
-func Insert(p *page.Page, key int64, recordID int64) error {
-	encodedKey := EncodeInt64(key)
-	entryBytes := append(encodedKey, EncodeInt64(recordID)...)
-
-	index, _ := findKeyIndex(p, encodedKey)
-
-	if !p.HasSpaceFor(len(entryBytes)) {
-		return ErrPageFull
+// Finds `node`'s left and right sibling PageIDs among `grandparent`'s
+// children. Internal pages don't carry stored Prev/Next pointers like
+// leaves do, so a node's siblings can only be found by locating its
+// position among its own parent's children and looking one position
+// to either side.
+//
+// Applies the mapping documented on findChildIndex. Returns 0 for
+// whichever side doesn't exist (node is the first or last child).
+func findSiblingPageIDs(grandparent, node *page.Page) (leftID, rightID page.PageID) {
+	idx, _ := findChildIndex(grandparent, node.ID)
+	n := grandparent.NumEntries()
+	if idx == n {
+		return 0, page.PageID(binary.BigEndian.Uint64(grandparent.GetEntry(0)[8:]))
 	}
 
-	p.InsertEntry(index, entryBytes)
-	return nil
-}
-
-// Looks up `key` on `p` directly. Does not traverse the tree.
-func Search(p *page.Page, key int64) (recordID int64, found bool) {
-	encodedKey := EncodeInt64(key)
-	index, ok := findKeyIndex(p, encodedKey)
-	if !ok {
-		return 0, false
+	if idx == 0 {
+		leftID = grandparent.LeftmostChildPageID()
+	} else {
+		leftID = page.PageID(binary.BigEndian.Uint64(grandparent.GetEntry(idx - 1)[8:]))
 	}
-	valueBytes := p.GetEntry(index)[8:]
-	value := DecodeInt64(valueBytes)
-	return value, true
-}
 
-// Deletes `key` from `p` directly. Does not traverse the tree and does
-// not check or fix underflow — that's the caller's (BTree.Delete's)
-// responsibility once this is wired into the tree.
-func Delete(p *page.Page, key int64) error {
-	encodedKey := EncodeInt64(key)
-	index, ok := findKeyIndex(p, encodedKey)
-	if !ok {
-		return ErrKeyNotFound
+	if idx+1 < n {
+		rightID = page.PageID(binary.BigEndian.Uint64(grandparent.GetEntry(idx + 1)[8:]))
 	}
-	p.DeleteEntry(index)
-	return nil
+	return leftID, rightID
 }
 
 // Borrows exactly one entry from `leftSibling` to fix `underflowing`'s
@@ -113,7 +152,8 @@ func Delete(p *page.Page, key int64) error {
 // than every key in `underflowing`.
 func redistributeFromLeft(underflowing, leftSibling *page.Page) (newSeparator []byte) {
 	lastIdx := leftSibling.NumEntries() - 1
-	entry := leftSibling.GetEntry(lastIdx)
+	// DeleteEntry compacts leftSibling, so copy the entry before deleting it.
+	entry := append([]byte(nil), leftSibling.GetEntry(lastIdx)...)
 
 	leftSibling.DeleteEntry(lastIdx)
 
@@ -128,7 +168,8 @@ func redistributeFromLeft(underflowing, leftSibling *page.Page) (newSeparator []
 // pages sorted and keeping every key in `rightSibling` still larger
 // than every key in `underflowing`.
 func redistributeFromRight(underflowing, rightSibling *page.Page) (newSeparator []byte) {
-	entry := rightSibling.GetEntry(0)
+	// DeleteEntry compacts rightSibling, so copy the entry before deleting it.
+	entry := append([]byte(nil), rightSibling.GetEntry(0)...)
 
 	rightSibling.DeleteEntry(0)
 
@@ -153,6 +194,46 @@ func mergeLeaf(left, right *page.Page) {
 	}
 }
 
+func mergeInternal(left, right *page.Page, oldParentSeparator []byte) {
+	leftmostChild := right.LeftmostChildPageID()
+	entryBytes := append(append([]byte{}, oldParentSeparator...), encodeChildID(leftmostChild)...)
+
+	left.InsertEntry(left.NumEntries(), entryBytes)
+	for i := uint16(0); i < right.NumEntries(); i++ {
+		left.InsertEntry(left.NumEntries(), right.GetEntry(i))
+	}
+}
+
+func redistributeInternalFromLeft(underflowing, leftSibling *page.Page, oldParentSeparator []byte) (newParentSeparator []byte) {
+	lastIdx := leftSibling.NumEntries() - 1
+	lastEntry := append([]byte(nil), leftSibling.GetEntry(lastIdx)...)
+	movedChildBytes := lastEntry[8:]
+	newParentSeparator = lastEntry[:8]
+
+	oldLeftmostChild := underflowing.LeftmostChildPageID()
+
+	leftSibling.DeleteEntry(lastIdx)
+
+	newFirstEntry := append(append([]byte{}, oldParentSeparator...), encodeChildID(oldLeftmostChild)...)
+	underflowing.InsertEntry(0, newFirstEntry)
+	underflowing.SetLeftmostChildPageID(page.PageID(binary.BigEndian.Uint64(movedChildBytes)))
+	return newParentSeparator
+}
+
+func redistributeInternalFromRight(underflowing, rightSibling *page.Page, oldParentSeparator []byte) (newParentSeparator []byte) {
+	oldLeftmostChild := rightSibling.LeftmostChildPageID()
+	firstEntry := append([]byte(nil), rightSibling.GetEntry(0)...)
+	oldFirstEntry := firstEntry[8:]
+	newParentSeparator = firstEntry[:8]
+
+	rightSibling.DeleteEntry(0)
+
+	latestEntry := append(append([]byte{}, oldParentSeparator...), encodeChildID(oldLeftmostChild)...)
+	underflowing.InsertEntry(underflowing.NumEntries(), latestEntry)
+	rightSibling.SetLeftmostChildPageID(page.PageID(binary.BigEndian.Uint64(oldFirstEntry)))
+	return newParentSeparator
+}
+
 // Splits a full leaf page. The smaller half (lower `NumEntries()/2` entries) stays in `oldPage`; the larger half moves to a newly allocated page.
 // Sibling pointers (`NextLeafPageID`/`PrevLeafPageID`) are rewired to keep the leaf linked list correct.
 // `separatorKey` is the new page's first key — a real, retrievable entry (leaf keys are never discarded).
@@ -161,7 +242,7 @@ func splitLeaf(oldPage *page.Page, allocateFn func() *page.Page) (separatorKey [
 
 	var moving [][]byte
 	for i := mid; i < oldPage.NumEntries(); i++ {
-		moving = append(moving, oldPage.GetEntry(i))
+		moving = append(moving, append([]byte(nil), oldPage.GetEntry(i)...))
 	}
 
 	for i := oldPage.NumEntries() - 1; i >= mid; i-- {
@@ -186,13 +267,14 @@ func splitLeaf(oldPage *page.Page, allocateFn func() *page.Page) (separatorKey [
 func splitInternal(oldPage *page.Page, allocateFn func() *page.Page) (separatorKey []byte, newPage *page.Page, err error) {
 	mid := oldPage.NumEntries() / 2
 
-	separatorKey = oldPage.GetEntry(mid)[:8]
-	childBytes := oldPage.GetEntry(mid)[8:]
+	middleEntry := append([]byte(nil), oldPage.GetEntry(mid)...)
+	separatorKey = middleEntry[:8]
+	childBytes := middleEntry[8:]
 	middleChildID := page.PageID(binary.BigEndian.Uint64(childBytes))
 
 	var moving [][]byte
 	for i := mid + 1; i < oldPage.NumEntries(); i++ {
-		moving = append(moving, oldPage.GetEntry(i))
+		moving = append(moving, append([]byte(nil), oldPage.GetEntry(i)...))
 	}
 
 	reserved := allocateFn()
@@ -207,11 +289,4 @@ func splitInternal(oldPage *page.Page, allocateFn func() *page.Page) (separatorK
 	}
 
 	return separatorKey, newPage, nil
-}
-
-// Encodes `id` as 8 big-endian bytes, for use as the value half of an internal-page entry.
-func encodeChildID(id page.PageID) []byte {
-	b := make([]byte, 8)
-	binary.BigEndian.PutUint64(b, uint64(id))
-	return b
 }

@@ -191,3 +191,104 @@ func TestInsertTriggersMultiLevelSplit(t *testing.T) {
 		t.Errorf("Search(%d): expected found=false, got true", numKeys+999)
 	}
 }
+
+func TestDeleteTriggersMultiLevelCascade(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	tree, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer tree.Close()
+
+	const numKeys = 45000
+
+	for i := int64(0); i < numKeys; i++ {
+		if err := tree.Insert(i, i*10); err != nil {
+			t.Fatalf("Insert(%d) failed: %v", i, err)
+		}
+	}
+
+	// Same multi-level confirmation as TestInsertTriggersMultiLevelSplit
+	// — establish we're starting from a real 3-level tree before we
+	// start deleting from it.
+	rootPage, err := tree.pm.ReadPage(tree.rootID)
+	if err != nil {
+		t.Fatalf("ReadPage(root) failed: %v", err)
+	}
+	if rootPage.PageType() != page.InternalPage {
+		t.Fatalf("setup problem: expected root to be InternalPage after %d inserts, got PageType=%v", numKeys, rootPage.PageType())
+	}
+	leftmostChild, err := tree.pm.ReadPage(rootPage.LeftmostChildPageID())
+	if err != nil {
+		t.Fatalf("ReadPage(root's leftmost child) failed: %v", err)
+	}
+	if leftmostChild.PageType() != page.InternalPage {
+		t.Fatalf("setup problem: expected root's leftmost child to be InternalPage (3-level tree), got PageType=%v", leftmostChild.PageType())
+	}
+
+	// Delete a large contiguous block from the low end — roughly 44%
+	// of the tree. Large and contiguous so many leaves in the same
+	// area empty out together, forcing repeated leaf merges that
+	// cascade into internal-page merges, and likely root-shrink.
+	const deleteUpTo = 20000 // delete keys [0, deleteUpTo)
+
+	for i := int64(0); i < deleteUpTo; i++ {
+		if err := tree.Delete(i); err != nil {
+			t.Fatalf("Delete(%d) failed: %v", i, err)
+		}
+	}
+
+	// Deleted keys must all be gone.
+	deletedSpotChecks := []int64{0, 1, deleteUpTo / 4, deleteUpTo / 2, deleteUpTo - 1}
+	for _, key := range deletedSpotChecks {
+		if _, found := tree.Search(key); found {
+			t.Errorf("Search(%d): expected found=false after delete, got true", key)
+		}
+	}
+
+	// Surviving keys — everything from deleteUpTo to numKeys — must
+	// still be intact, with correct recordIDs. This is what actually
+	// proves the cascade didn't corrupt anything: separators, sibling
+	// pointers, and root/internal structure all still route searches
+	// correctly after multiple rounds of merging.
+	survivingSpotChecks := []int64{
+		deleteUpTo,
+		deleteUpTo + 1,
+		deleteUpTo + (numKeys-deleteUpTo)/4,
+		(deleteUpTo + numKeys) / 2,
+		numKeys - 1,
+	}
+	for _, key := range survivingSpotChecks {
+		gotRecordID, found := tree.Search(key)
+		if !found {
+			t.Errorf("Search(%d): expected found=true (surviving key), got false", key)
+			continue
+		}
+		if gotRecordID != key*10 {
+			t.Errorf("Search(%d): recordID = %d, want %d", key, gotRecordID, key*10)
+		}
+	}
+
+	// The tree should still work after reopening — proves the cascade
+	// (including any root-shrink) correctly persisted rootID via the
+	// metadata page, not just left the in-memory tree correct.
+	if err := tree.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	reopened, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open (reopen) failed: %v", err)
+	}
+	defer reopened.Close()
+
+	if _, found := reopened.Search(deleteUpTo / 2); found {
+		t.Errorf("Search(%d) after reopen: expected found=false, got true", deleteUpTo/2)
+	}
+	gotRecordID, found := reopened.Search(numKeys - 1)
+	if !found {
+		t.Errorf("Search(%d) after reopen: expected found=true, got false", numKeys-1)
+	} else if gotRecordID != (numKeys-1)*10 {
+		t.Errorf("Search(%d) after reopen: recordID = %d, want %d", numKeys-1, gotRecordID, (numKeys-1)*10)
+	}
+}

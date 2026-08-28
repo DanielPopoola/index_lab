@@ -205,14 +205,29 @@ func (p *Page) InsertEntry(slotIndex uint16, entryBytes []byte) {
 	p.setNumEntries(n + 1)
 }
 
-// Removes the entry at `slotIndex`, shifting later slots left by one.
+// Removes the entry at `slotIndex` and compacts the remaining entries.
+//
+// Entry data is stored from the end of the page downward. Merely shifting
+// slots would make the deleted entry's bytes unreachable but would not
+// reclaim their space, eventually causing merges to run out of physical
+// space even though NumEntries is below MaxEntries.
 func (p *Page) DeleteEntry(slotIndex uint16) {
 	n := p.NumEntries()
-
-	for i := slotIndex; i < n-1; i++ {
-		moving := p.getSlot(i + 1)
-		p.setSlot(i, moving)
+	if slotIndex >= n {
+		return
 	}
 
-	p.setNumEntries(n - 1)
+	entries := make([][]byte, 0, n-1)
+	for i := uint16(0); i < n; i++ {
+		if i == slotIndex {
+			continue
+		}
+		entries = append(entries, append([]byte(nil), p.GetEntry(i)...))
+	}
+
+	p.setNumEntries(0)
+	p.setFreeSpaceOffset(PageSize)
+	for i, entry := range entries {
+		p.InsertEntry(uint16(i), entry)
+	}
 }

@@ -2,6 +2,7 @@ package btree
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"testing"
 
@@ -342,6 +343,219 @@ func TestFindChildIndex(t *testing.T) {
 	_, found = findChildIndex(p, noSuchChild)
 	if found {
 		t.Errorf("findChildIndex(noSuchChild): expected found=false, got true")
+	}
+}
+
+func buildInternalPage(id, leftmost page.PageID, entries []struct {
+	key   int64
+	child page.PageID
+}) *page.Page {
+	p := page.NewInternalPage(id, leftmost)
+	for _, e := range entries {
+		entryBytes := append(EncodeInt64(e.key), encodeChildID(e.child)...)
+		p.InsertEntry(p.NumEntries(), entryBytes)
+	}
+	return p
+}
+
+func TestFindSiblingPageIDs(t *testing.T) {
+	// grandparent = [Leftmost=C0 | key=30,child=C1 | key=60,child=C2]
+	c0, c1, c2 := page.PageID(10), page.PageID(11), page.PageID(12)
+	grandparent := buildInternalPage(0, c0, []struct {
+		key   int64
+		child page.PageID
+	}{
+		{30, c1},
+		{60, c2},
+	})
+
+	// node = C0 (leftmost): no left sibling, right sibling = C1.
+	nodeC0 := &page.Page{ID: c0}
+	leftID, rightID := findSiblingPageIDs(grandparent, nodeC0)
+	if leftID != 0 {
+		t.Errorf("C0: leftID = %d, want 0 (none)", leftID)
+	}
+	if rightID != c1 {
+		t.Errorf("C0: rightID = %d, want %d (C1)", rightID, c1)
+	}
+
+	// node = C1 (middle): left sibling = C0, right sibling = C2.
+	nodeC1 := &page.Page{ID: c1}
+	leftID, rightID = findSiblingPageIDs(grandparent, nodeC1)
+	if leftID != c0 {
+		t.Errorf("C1: leftID = %d, want %d (C0)", leftID, c0)
+	}
+	if rightID != c2 {
+		t.Errorf("C1: rightID = %d, want %d (C2)", rightID, c2)
+	}
+
+	// node = C2 (last): left sibling = C1, no right sibling.
+	nodeC2 := &page.Page{ID: c2}
+	leftID, rightID = findSiblingPageIDs(grandparent, nodeC2)
+	if leftID != c1 {
+		t.Errorf("C2: leftID = %d, want %d (C1)", leftID, c1)
+	}
+	if rightID != 0 {
+		t.Errorf("C2: rightID = %d, want 0 (none)", rightID)
+	}
+}
+
+func TestRedistributeInternalFromLeft(t *testing.T) {
+	// leftSibling = [leftmost=X | key=20,child=Y]  (2 children: X, Y)
+	// underflowing = [leftmost=Z | key=80,child=W]  (2 children: Z, W)
+	// old parent separator between them: 50.
+	x, y, z, w := page.PageID(1), page.PageID(2), page.PageID(3), page.PageID(4)
+
+	leftSibling := buildInternalPage(0, x, []struct {
+		key   int64
+		child page.PageID
+	}{{20, y}})
+
+	underflowing := buildInternalPage(1, z, []struct {
+		key   int64
+		child page.PageID
+	}{{80, w}})
+
+	oldParentSeparator := EncodeInt64(50)
+
+	newParentSeparator := redistributeInternalFromLeft(underflowing, leftSibling, oldParentSeparator)
+
+	// leftSibling loses its last entry: back to just leftmost=X.
+	if leftSibling.NumEntries() != 0 {
+		t.Fatalf("leftSibling.NumEntries() = %d, want 0", leftSibling.NumEntries())
+	}
+	if leftSibling.LeftmostChildPageID() != x {
+		t.Errorf("leftSibling.LeftmostChildPageID() = %d, want %d (X, unchanged)", leftSibling.LeftmostChildPageID(), x)
+	}
+
+	// underflowing: new leftmost is Y (the moved child); new first
+	// entry pairs the OLD parent separator (50) with underflowing's
+	// OLD leftmost (Z).
+	if underflowing.NumEntries() != 2 {
+		t.Fatalf("underflowing.NumEntries() = %d, want 2", underflowing.NumEntries())
+	}
+	if underflowing.LeftmostChildPageID() != y {
+		t.Errorf("underflowing.LeftmostChildPageID() = %d, want %d (Y, the moved child)", underflowing.LeftmostChildPageID(), y)
+	}
+	firstEntry := underflowing.GetEntry(0)
+	if !bytes.Equal(firstEntry[:8], EncodeInt64(50)) {
+		t.Errorf("underflowing entry 0 key = %x, want %x (old parent separator)", firstEntry[:8], EncodeInt64(50))
+	}
+	firstEntryChild := page.PageID(binary.BigEndian.Uint64(firstEntry[8:]))
+	if firstEntryChild != z {
+		t.Errorf("underflowing entry 0 child = %d, want %d (Z, underflowing's old leftmost)", firstEntryChild, z)
+	}
+
+	// new parent separator = the moved entry's own key (20).
+	if !bytes.Equal(newParentSeparator, EncodeInt64(20)) {
+		t.Errorf("newParentSeparator = %x, want %x (20)", newParentSeparator, EncodeInt64(20))
+	}
+}
+
+func TestRedistributeInternalFromRight(t *testing.T) {
+	// underflowing = [leftmost=P | key=10,child=Q]  (2 children: P, Q)
+	// rightSibling = [leftmost=R | key=80,child=S]  (2 children: R, S)
+	// old parent separator between them: 50.
+	p, q, r, s := page.PageID(1), page.PageID(2), page.PageID(3), page.PageID(4)
+
+	underflowing := buildInternalPage(0, p, []struct {
+		key   int64
+		child page.PageID
+	}{{10, q}})
+
+	rightSibling := buildInternalPage(1, r, []struct {
+		key   int64
+		child page.PageID
+	}{{80, s}})
+
+	oldParentSeparator := EncodeInt64(50)
+
+	newParentSeparator := redistributeInternalFromRight(underflowing, rightSibling, oldParentSeparator)
+
+	// rightSibling: R moved out, new leftmost is S.
+	if rightSibling.NumEntries() != 0 {
+		t.Fatalf("rightSibling.NumEntries() = %d, want 0", rightSibling.NumEntries())
+	}
+	if rightSibling.LeftmostChildPageID() != s {
+		t.Errorf("rightSibling.LeftmostChildPageID() = %d, want %d (S)", rightSibling.LeftmostChildPageID(), s)
+	}
+
+	// underflowing: gains a new LAST entry pairing the OLD parent
+	// separator (50) with the moved child (R). Leftmost (P) unchanged.
+	if underflowing.NumEntries() != 2 {
+		t.Fatalf("underflowing.NumEntries() = %d, want 2", underflowing.NumEntries())
+	}
+	if underflowing.LeftmostChildPageID() != p {
+		t.Errorf("underflowing.LeftmostChildPageID() = %d, want %d (P, unchanged)", underflowing.LeftmostChildPageID(), p)
+	}
+	lastEntry := underflowing.GetEntry(underflowing.NumEntries() - 1)
+	if !bytes.Equal(lastEntry[:8], EncodeInt64(50)) {
+		t.Errorf("underflowing last entry key = %x, want %x (old parent separator)", lastEntry[:8], EncodeInt64(50))
+	}
+	lastEntryChild := page.PageID(binary.BigEndian.Uint64(lastEntry[8:]))
+	if lastEntryChild != r {
+		t.Errorf("underflowing last entry child = %d, want %d (R, the moved child)", lastEntryChild, r)
+	}
+
+	// new parent separator = rightSibling's NEW first entry's key (80)
+	// — NOT the moved entry. Same asymmetry as leaf redistribute-from-right.
+	if !bytes.Equal(newParentSeparator, EncodeInt64(80)) {
+		t.Errorf("newParentSeparator = %x, want %x (80)", newParentSeparator, EncodeInt64(80))
+	}
+}
+
+func TestMergeInternal(t *testing.T) {
+	// left = [leftmost=P1 | key=30,child=P2]
+	// right = [leftmost=P3 | key=150,child=P4]
+	// parent separator between them: 100.
+	p1, p2, p3, p4 := page.PageID(1), page.PageID(2), page.PageID(3), page.PageID(4)
+
+	left := buildInternalPage(0, p1, []struct {
+		key   int64
+		child page.PageID
+	}{{30, p2}})
+
+	right := buildInternalPage(1, p3, []struct {
+		key   int64
+		child page.PageID
+	}{{150, p4}})
+
+	oldParentSeparator := EncodeInt64(100)
+
+	mergeInternal(left, right, oldParentSeparator)
+
+	// Expected result: left = [leftmost=P1 | key=30,child=P2 | key=100,child=P3 | key=150,child=P4]
+	if left.NumEntries() != 3 {
+		t.Fatalf("left.NumEntries() = %d, want 3", left.NumEntries())
+	}
+	if left.LeftmostChildPageID() != p1 {
+		t.Errorf("left.LeftmostChildPageID() = %d, want %d (P1, unchanged)", left.LeftmostChildPageID(), p1)
+	}
+
+	entry0 := left.GetEntry(0)
+	if !bytes.Equal(entry0[:8], EncodeInt64(30)) {
+		t.Errorf("entry 0 key = %x, want %x (30, left's original entry)", entry0[:8], EncodeInt64(30))
+	}
+	if child := page.PageID(binary.BigEndian.Uint64(entry0[8:])); child != p2 {
+		t.Errorf("entry 0 child = %d, want %d (P2)", child, p2)
+	}
+
+	// The synthetic entry: old parent separator (100) paired with
+	// right's old leftmost (P3).
+	entry1 := left.GetEntry(1)
+	if !bytes.Equal(entry1[:8], EncodeInt64(100)) {
+		t.Errorf("entry 1 key = %x, want %x (100, pulled-down parent separator)", entry1[:8], EncodeInt64(100))
+	}
+	if child := page.PageID(binary.BigEndian.Uint64(entry1[8:])); child != p3 {
+		t.Errorf("entry 1 child = %d, want %d (P3, right's old leftmost)", child, p3)
+	}
+
+	entry2 := left.GetEntry(2)
+	if !bytes.Equal(entry2[:8], EncodeInt64(150)) {
+		t.Errorf("entry 2 key = %x, want %x (150, right's original entry)", entry2[:8], EncodeInt64(150))
+	}
+	if child := page.PageID(binary.BigEndian.Uint64(entry2[8:])); child != p4 {
+		t.Errorf("entry 2 child = %d, want %d (P4)", child, p4)
 	}
 }
 
