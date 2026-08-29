@@ -185,16 +185,16 @@ func (p *Page) HasSpaceFor(entryLen int) bool {
 }
 
 // MaxEntries returns the maximum number of fixed-size entries
-func MaxEntries() uint16 {
-	return (PageSize - HeaderSize) / (SlotSize + EntrySize)
+func MaxEntries(entrySize uint16) uint16 {
+	return (PageSize - HeaderSize) / (SlotSize + entrySize)
 }
 
 // MinEntries returns the minimum number of entries a non-root page must
 // hold to satisfy the B+ tree's occupancy invariant ("at least half
 // full"). The root page is exempt from this rule — callers must check
 // for that separately.
-func MinEntries() uint16 {
-	return MaxEntries() / 2
+func MinEntries(entrySize uint16) uint16 {
+	return MaxEntries(entrySize) / 2
 }
 
 // Inserts `entryBytes` as a new entry, placing its slot at sorted position `slotIndex`.

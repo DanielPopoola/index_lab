@@ -31,3 +31,20 @@ func DecodeInt64(encoded []byte) int64 {
 func CompareKeys(a, b []byte) int {
 	return bytes.Compare(a, b)
 }
+
+// CompositeEntrySize is the total per-entry byte width for a composite
+// (columnA, columnB) index: 16-byte key (two 8-byte columns) + 8-byte
+// value/recordID, vs. the single-column tree's 8+8=16.
+const CompositeEntrySize = 24
+
+func EncodeCompositeKey(columnA, columnB int64) []byte {
+	encodedColumnA := EncodeInt64(columnA)
+	encodedColumnB := EncodeInt64(columnB)
+	return append(append([]byte(nil), encodedColumnA...), encodedColumnB...)
+}
+
+func DecodeCompositeKey(encoded []byte) (columnA, columnB int64) {
+	encodedColumnA := encoded[:8]
+	encodedColumnB := encoded[8:]
+	return DecodeInt64(encodedColumnA), DecodeInt64(encodedColumnB)
+}

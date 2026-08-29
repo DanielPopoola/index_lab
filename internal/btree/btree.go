@@ -14,8 +14,9 @@ var ErrInvalidRange = errors.New("start key must be less than end key")
 // Persistent B+ tree backed by a single database file.
 // Wraps a `*storage.PageManager` and tracks the current root `PageID`.
 type BTree struct {
-	pm     *storage.PageManager
-	rootID page.PageID
+	pm        *storage.PageManager
+	rootID    page.PageID
+	entrySize uint16
 }
 
 // Opens or creates a B+ tree at `path`.
@@ -48,7 +49,7 @@ func Open(path string) (*BTree, error) {
 		rootID = metaPage.RootPageID()
 	}
 
-	return &BTree{pm: pm, rootID: rootID}, nil
+	return &BTree{pm: pm, rootID: rootID, entrySize: 16}, nil
 }
 
 // Closes the underlying `PageManager`.
@@ -185,7 +186,7 @@ func (t *BTree) Delete(key int64) error {
 		return t.pm.WritePage(leaf)
 	}
 
-	if leaf.NumEntries() >= page.MinEntries() {
+	if leaf.NumEntries() >= page.MinEntries(t.entrySize) {
 		return t.pm.WritePage(leaf)
 	}
 
@@ -247,10 +248,10 @@ func (t *BTree) fixLeafUnderflow(leaf *page.Page, ancestors []page.PageID) error
 		}
 	}
 
-	if leftPage != nil && leftPage.NumEntries() > page.MinEntries() {
+	if leftPage != nil && leftPage.NumEntries() > page.MinEntries(t.entrySize) {
 		return t.redistributeLeafFromLeft(leaf, leftPage, parent)
 	}
-	if rightPage != nil && rightPage.NumEntries() > page.MinEntries() {
+	if rightPage != nil && rightPage.NumEntries() > page.MinEntries(t.entrySize) {
 		return t.redistributeLeafFromRight(leaf, rightPage, parent)
 	}
 	if leftPage != nil {
@@ -410,10 +411,10 @@ func (t *BTree) fixInternalUnderflow(node *page.Page, ancestors []page.PageID) e
 		}
 	}
 
-	if leftSibling != nil && leftSibling.NumEntries() > page.MinEntries() {
+	if leftSibling != nil && leftSibling.NumEntries() > page.MinEntries(t.entrySize) {
 		return t.redistributeInternalNodeFromLeft(node, leftSibling, grandparent)
 	}
-	if rightSibling != nil && rightSibling.NumEntries() > page.MinEntries() {
+	if rightSibling != nil && rightSibling.NumEntries() > page.MinEntries(t.entrySize) {
 		return t.redistributeInternalNodeFromRight(node, rightSibling, grandparent)
 	}
 	if leftSibling != nil {
@@ -513,7 +514,7 @@ func (t *BTree) mergeInternalWithRight(node, rightSibling, grandparent *page.Pag
 // ancestors[len(ancestors)-1].
 func (t *BTree) finishInternalMerge(grandparent *page.Page, ancestors []page.PageID) error {
 	isRoot := len(ancestors) == 1 // grandparent's OWN ancestors would be empty
-	if !isRoot && grandparent.NumEntries() >= page.MinEntries() {
+	if !isRoot && grandparent.NumEntries() >= page.MinEntries(t.entrySize) {
 		return t.pm.WritePage(grandparent)
 	}
 	if isRoot && grandparent.NumEntries() > 0 {
