@@ -14,8 +14,7 @@ func TestStatsOnFreshTree(t *testing.T) {
 	}
 	defer tree.Close()
 
-	// A brand-new tree is a single empty leaf acting as root: height 1,
-	// one page total, zero entries, no splits/merges yet.
+	// Fresh tree: single empty leaf as root.
 	stats, err := tree.Stats()
 	if err != nil {
 		t.Fatalf("Stats failed: %v", err)
@@ -64,7 +63,7 @@ func TestStatsCountsInsertsWithoutSplit(t *testing.T) {
 		t.Fatalf("Stats failed: %v", err)
 	}
 	if stats.Height != 1 {
-		t.Fatalf("Height = %d, want 1 (5 keys shouldn't force a split)", stats.Height)
+		t.Fatalf("Height = %d, want 1", stats.Height)
 	}
 	if stats.TotalEntries != numKeys {
 		t.Fatalf("TotalEntries = %d, want %d", stats.TotalEntries, numKeys)
@@ -109,19 +108,14 @@ func TestStatsReflectsForcedSplit(t *testing.T) {
 			stats.TotalPages, stats.LeafPages, stats.InternalPages, stats.LeafPages+stats.InternalPages)
 	}
 	if stats.TotalEntries != numKeys {
-		t.Fatalf("TotalEntries = %d, want %d (every key should still be present)", stats.TotalEntries, numKeys)
+		t.Fatalf("TotalEntries = %d, want %d", stats.TotalEntries, numKeys)
 	}
 	if stats.PageSplits == 0 {
 		t.Fatalf("PageSplits = 0, want > 0 after %d inserts", numKeys)
 	}
 
-	// Every leaf split roughly halves a page's entries and creates one
-	// new page; the resulting page count should be consistent with the
-	// number of splits that were recorded — a loose sanity bound
-	// rather than an exact formula (internal-page splits and root
-	// creation also contribute pages).
 	if stats.TotalPages <= 1 {
-		t.Fatalf("TotalPages = %d, expected clearly more than 1 given %d splits were recorded", stats.TotalPages, stats.PageSplits)
+		t.Fatalf("TotalPages = %d, want > 1 after %d inserts", stats.TotalPages, numKeys)
 	}
 }
 
@@ -141,7 +135,7 @@ func TestStatsCountsMerges(t *testing.T) {
 		}
 	}
 
-	// Delete most of them, forcing redistribution and merges.
+	// Delete most keys to trigger merges.
 	for i := int64(0); i < numKeys-10; i++ {
 		if err := tree.Delete(i); err != nil {
 			t.Fatalf("Delete(%d) failed: %v", i, err)

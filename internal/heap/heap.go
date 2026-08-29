@@ -48,6 +48,22 @@ func (h *Heap) Close() error {
 	return h.pm.Close()
 }
 
+// PageReads returns the number of page reads performed so far.
+func (h *Heap) PageReads() uint64 {
+	return h.pm.PageReads()
+}
+
+// PageWrites returns the number of page writes performed so far.
+func (h *Heap) PageWrites() uint64 {
+	return h.pm.PageWrites()
+}
+
+// ResetStats zeroes the read/write counters, for starting a fresh
+// measurement window between experiments.
+func (h *Heap) ResetStats() {
+	h.pm.ResetStats()
+}
+
 // Put stores rowBytes and returns a RecordID for later retrieval.
 func (h *Heap) Put(rowBytes []byte) (recordID int64, err error) {
 	if page.HeaderSize+page.SlotSize+len(rowBytes) > page.PageSize {

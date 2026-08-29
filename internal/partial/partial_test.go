@@ -28,8 +28,6 @@ func TestUpsertActiveRowGetsIndexed(t *testing.T) {
 }
 
 func TestUpsertDeletedRowNeverIndexed(t *testing.T) {
-	// Record 2 from the spec's own example: key=20, status=DELETED ->
-	// not indexed.
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 
 	pi, err := Open(dbPath)
@@ -48,8 +46,6 @@ func TestUpsertDeletedRowNeverIndexed(t *testing.T) {
 }
 
 func TestUpsertDeletedToActiveAddsRecord(t *testing.T) {
-	// "When a record changes from DELETED to ACTIVE, the index must
-	// add the record." — the spec's exact transition.
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 
 	pi, err := Open(dbPath)
@@ -79,8 +75,6 @@ func TestUpsertDeletedToActiveAddsRecord(t *testing.T) {
 }
 
 func TestUpsertActiveToDeletedRemovesRecord(t *testing.T) {
-	// "When a record changes from ACTIVE to DELETED, the index must
-	// remove the record." — the spec's other explicit transition.
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 
 	pi, err := Open(dbPath)
@@ -106,9 +100,6 @@ func TestUpsertActiveToDeletedRemovesRecord(t *testing.T) {
 }
 
 func TestUpsertActiveRowUpdatesRecordID(t *testing.T) {
-	// A row can stay Active but have its RecordID change (e.g. the
-	// underlying heap row moved). Upsert must reflect the new
-	// RecordID, not silently keep serving the stale one.
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 
 	pi, err := Open(dbPath)
@@ -134,8 +125,6 @@ func TestUpsertActiveRowUpdatesRecordID(t *testing.T) {
 }
 
 func TestUpsertDeletedRowStaysAbsentOnRepeat(t *testing.T) {
-	// Deleted -> Deleted (no-op branch) must not error and must not
-	// somehow insert the row.
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 
 	pi, err := Open(dbPath)

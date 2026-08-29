@@ -9,10 +9,7 @@ import (
 	"github.com/DanielPopoola/index_lab/internal/btree"
 )
 
-// Status is a row's indexing eligibility. Active rows belong in the
-// index; every other status does not. This project implements exactly
-// one fixed predicate (Status == Active) — not general user-defined
-// predicates — so Status only needs two values to demonstrate it.
+// Status indicates whether a row should be indexed (Active) or not.
 type Status int
 
 const (
@@ -20,9 +17,7 @@ const (
 	Active
 )
 
-// Row is the minimal row model the spec asks for: a key, a RecordID
-// it maps to, and the status that decides whether it belongs in the
-// index right now.
+// Row represents a row with its key, RecordID, and indexing status.
 type Row struct {
 	Key      int64
 	RecordID int64
@@ -49,14 +44,19 @@ func (pi *PartialIndex) Close() error {
 	return pi.tree.Close()
 }
 
-// Upsert reconciles the index against row's current Status:
-//   - Active and not yet indexed:      insert it.
-//   - Active and already indexed:      update the stored RecordID
-//     (the row's data may have changed even though its key/status
-//     didn't — Delete then Insert is the simplest correct way to
-//     apply that, since BTree has no in-place update).
-//   - Not Active and currently indexed: remove it.
-//   - Not Active and not indexed:       nothing to do.
+// Stats reports the underlying tree's current shape and event counters.
+func (pi *PartialIndex) Stats() (btree.TreeStats, error) {
+	return pi.tree.Stats()
+}
+
+// ResetStats zeroes the underlying tree's event counters.
+func (pi *PartialIndex) ResetStats() {
+	pi.tree.ResetStats()
+}
+
+// Upsert reconciles the index against the row's current Status:
+// inserting if Active and missing, deleting if not Active and present,
+// or updating RecordID if Active and already indexed.
 func (pi *PartialIndex) Upsert(row Row) error {
 	_, alreadyIndexed := pi.tree.Search(row.Key)
 

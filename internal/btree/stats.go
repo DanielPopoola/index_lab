@@ -6,13 +6,9 @@ import (
 	"github.com/DanielPopoola/index_lab/internal/page"
 )
 
-// TreeStats reports the tree's current shape and cumulative event
-// counts. Structural fields (Height, page/entry counts) are computed
-// fresh by walking the real tree every time Stats is called — there's
-// no incremental bookkeeping to keep in sync with every split, merge,
-// and root-shrink, so they can't silently drift from what's actually
-// on disk. Event fields (splits, merges, reads, writes) are running
-// counters incremented at the source as those operations happen.
+// TreeStats reports the tree's current shape and cumulative event counts.
+// Structural fields (Height, page/entry counts) are computed by walking
+// the tree; event fields are running counters incremented as operations happen.
 type TreeStats struct {
 	Height        int
 	TotalPages    int
@@ -40,9 +36,7 @@ func (t *BTree) Stats() (TreeStats, error) {
 		return TreeStats{}, err
 	}
 
-	// BFS, level by level, so Height falls out naturally as the
-	// number of levels visited before hitting leaves — no separate
-	// depth-tracking needed beyond "how many times did this loop run."
+	// BFS level by level to compute Height and gather page stats.
 	level := []*page.Page{root}
 	for len(level) > 0 {
 		stats.Height++
@@ -76,9 +70,7 @@ func (t *BTree) Stats() (TreeStats, error) {
 	return stats, nil
 }
 
-// childPageIDs returns every child PageID an internal page points to:
-// LeftmostChildPageID plus one child per entry. Not meaningful for
-// leaf pages — callers must check PageType first.
+// childPageIDs returns the child PageIDs of an internal page.
 func childPageIDs(p *page.Page) ([]page.PageID, error) {
 	keyLen := entryKeyLen(p)
 
@@ -91,9 +83,7 @@ func childPageIDs(p *page.Page) ([]page.PageID, error) {
 	return ids, nil
 }
 
-// ResetStats zeroes every counter (splits, merges, reads, writes) for
-// a fresh measurement window. Structural stats need no resetting —
-// Stats() always recomputes them from the tree's actual current shape.
+// ResetStats zeroes all event counters for a fresh measurement window.
 func (t *BTree) ResetStats() {
 	t.pageSplits = 0
 	t.pageMerges = 0
