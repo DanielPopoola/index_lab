@@ -42,11 +42,17 @@ func (pm *PageManager) Close() error {
 	return pm.file.Close()
 }
 
-// Reserves the next unused `PageID` and returns a fresh leaf page with that ID.
-func (pm *PageManager) AllocatePage() *page.Page {
+// Reserves and returns the next unused `PageID`, without constructing a
+// page.
+func (pm *PageManager) AllocatePageID() page.PageID {
 	id := pm.nextPageID
 	pm.nextPageID++
-	return page.NewLeafPage(id)
+	return id
+}
+
+// Reserves the next unused `PageID` and returns a fresh leaf page with that ID.
+func (pm *PageManager) AllocatePage() *page.Page {
+	return page.NewLeafPage(pm.AllocatePageID())
 }
 
 // Reads the page at `id` from disk

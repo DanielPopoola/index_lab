@@ -123,14 +123,6 @@ type ScanResult struct {
 
 // Scan returns every (key, recordID) pair with startKey <= key <= endKey,
 // in ascending key order.
-//
-// Approach:
-//  1. Find the leaf that would contain startKey (same descent as Search).
-//  2. Within that leaf, find the first entry >= startKey.
-//  3. Walk forward entry-by-entry, collecting each one whose key <= endKey.
-//  4. When the current leaf runs out of entries, follow NextLeafPageID to
-//     the next leaf and keep going — UNLESS the leaf chain has ended
-//     (NextLeafPageID == 0) or the last entry read already exceeded endKey.
 func (t *BTree) Scan(startKey, endKey int64) ([]ScanResult, error) {
 	if startKey > endKey {
 		return nil, ErrInvalidRange

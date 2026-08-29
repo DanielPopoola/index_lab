@@ -17,6 +17,7 @@ const (
 	LeafPage PageType = iota
 	InternalPage
 	MetadataPage
+	HeapPage
 )
 
 // PageID identifies a page's position in the file. PageID N lives at byte
@@ -36,6 +37,19 @@ type Page struct {
 func NewLeafPage(id PageID) *Page {
 	p := &Page{ID: id}
 	p.SetPageType(LeafPage)
+	p.setFreeSpaceOffset(PageSize)
+	return p
+}
+
+// NewHeapPage builds a fresh, empty heap page with the given ID, ready
+// for InsertEntry calls. Heap pages use the same slot-array layout as
+// leaf pages (NumEntries, InsertEntry, GetEntry, HasSpaceFor all work
+// identically) but store opaque row bytes instead of 16-byte B+ tree
+// entries, and don't use the leaf-linking fields (NextLeafPageID etc.)
+// at all — those simply stay zero-valued and unused.
+func NewHeapPage(id PageID) *Page {
+	p := &Page{ID: id}
+	p.SetPageType(HeapPage)
 	p.setFreeSpaceOffset(PageSize)
 	return p
 }
