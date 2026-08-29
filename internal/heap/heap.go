@@ -81,6 +81,14 @@ func (h *Heap) writePage(p *page.Page) error {
 	return h.pm.WritePage(p)
 }
 
+// Sync flushes any dirty cached pages and then syncs the underlying file.
+func (h *Heap) Sync() error {
+	if h.pool != nil {
+		return h.pool.Sync()
+	}
+	return h.pm.Sync()
+}
+
 // Close closes the heap.
 //
 // If a buffer pool is configured, it flushes dirty pages before closing the

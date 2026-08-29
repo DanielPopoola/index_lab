@@ -107,6 +107,14 @@ func (t *BTree) writePage(p *page.Page) error {
 	return t.pm.WritePage(p)
 }
 
+// Sync flushes any dirty cached pages and then syncs the underlying file.
+func (t *BTree) Sync() error {
+	if t.pool != nil {
+		return t.pool.Sync()
+	}
+	return t.pm.Sync()
+}
+
 // Close closes the tree.
 //
 // If a buffer pool is configured, it flushes dirty pages before closing the

@@ -1,6 +1,4 @@
-// Package storage implements the PageManager: translates PageIDs into
-// byte offsets in a single database file, and handles reading/writing
-// fixed-size pages to/from disk.
+// Package storage implements page storage on disk.
 package storage
 
 import (
@@ -10,15 +8,16 @@ import (
 	"github.com/DanielPopoola/index_lab/internal/page"
 )
 
-// PageManager owns a single open file and translates PageIDs into byte offsets.
+// PageManager owns a database file and translates PageIDs into byte offsets.
 type PageManager struct {
 	file       *os.File
 	nextPageID page.PageID
 	pageReads  uint64
 	pageWrites uint64
+	syncCalls  uint64
 }
 
-// Open opens the database file at path, creating it if absent.
+// Open creates or opens the database file at path.
 func Open(path string) (*PageManager, error) {
 	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
@@ -85,6 +84,12 @@ func (pm *PageManager) WritePage(p *page.Page) error {
 	return nil
 }
 
+// Sync flushes pending file data to durable storage.
+func (pm *PageManager) Sync() error {
+	pm.syncCalls++
+	return pm.file.Sync()
+}
+
 // PageReads returns the number of ReadPage calls made so far.
 func (pm *PageManager) PageReads() uint64 {
 	return pm.pageReads
@@ -95,12 +100,18 @@ func (pm *PageManager) PageWrites() uint64 {
 	return pm.pageWrites
 }
 
-// ResetStats zeroes the read/write counters, without affecting
-// nextPageID or any on-disk content — for starting a fresh
-// measurement window between experiments.
+// SyncCalls returns the number of Sync calls made so far.
+func (pm *PageManager) SyncCalls() uint64 {
+	return pm.syncCalls
+}
+
+// ResetStats clears the read, write, and sync counters.
+//
+// It does not affect nextPageID or any on-disk content.
 func (pm *PageManager) ResetStats() {
 	pm.pageReads = 0
 	pm.pageWrites = 0
+	pm.syncCalls = 0
 }
 
 // PageCount returns the number of pages allocated so far.

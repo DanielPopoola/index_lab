@@ -176,14 +176,32 @@ func (p *Pool) FlushPage(id page.PageID) error {
 	return nil
 }
 
+// flushDirty writes all dirty pages in the cache back to disk without
+// closing the underlying PageManager.
+func (p *Pool) flushDirty() error {
+	for id := range p.items {
+		if err := p.FlushPage(id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Sync flushes all dirty pages in the cache and then syncs the underlying
+// PageManager to disk.
+func (p *Pool) Sync() error {
+	if err := p.flushDirty(); err != nil {
+		return err
+	}
+	return p.pm.Sync()
+}
+
 // Close flushes all dirty pages in the cache and then closes the underlying
 // PageManager.
 func (p *Pool) Close() error {
-	for id := range p.items {
-		if err := p.FlushPage(id); err != nil {
-			_ = p.pm.Close()
-			return err
-		}
+	if err := p.flushDirty(); err != nil {
+		_ = p.pm.Close()
+		return err
 	}
 	return p.pm.Close()
 }
