@@ -174,9 +174,6 @@ func TestHeapSurvivesReopenAcrossPageBoundary(t *testing.T) {
 		t.Fatalf("Open failed: %v", err)
 	}
 
-	// Enough rows to force at least one new page allocation, so the
-	// "which page was activePage when we closed" question is actually
-	// being tested, not trivially true because everything fit on page 0.
 	const numRows = 150
 	recordIDs := make([]int64, numRows)
 	for i := 0; i < numRows; i++ {

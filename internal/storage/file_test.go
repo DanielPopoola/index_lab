@@ -8,8 +8,6 @@ import (
 	"github.com/DanielPopoola/index_lab/internal/page"
 )
 
-// TestPageSurvivesReopen proves the core durability claim: a page written
-// before closing the file can be read back correctly after reopening it —
 func TestPageSurvivesReopen(t *testing.T) {
 	// t.TempDir() gives a fresh directory, auto-deleted when the test ends.
 	dbPath := filepath.Join(t.TempDir(), "test.db")

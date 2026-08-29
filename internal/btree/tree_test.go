@@ -97,10 +97,7 @@ func TestDelete(t *testing.T) {
 }
 
 func TestRedistributeFromLeft(t *testing.T) {
-	// Set up two adjacent leaves: leftSibling holds smaller keys,
-	// underflowing holds larger keys. leftSibling has entries to
-	// spare; underflowing does not (that's what makes it
-	// "underflowing" in this scenario).
+
 	leftSibling := page.NewLeafPage(0)
 	underflowing := page.NewLeafPage(1)
 
@@ -231,11 +228,6 @@ func TestRedistributeFromRight(t *testing.T) {
 }
 
 func TestMergeLeaf(t *testing.T) {
-	// Three-leaf chain: left <-> right <-> rightsRight.
-	// left and right are the two pages being merged; rightsRight
-	// stands in for the "third page" whose PrevLeafPageID a real
-	// caller would need to patch after this call (mergeLeaf itself
-	// doesn't touch rightsRight — it only has left/right in hand).
 	left := page.NewLeafPage(0)
 	right := page.NewLeafPage(1)
 	rightsRight := page.NewLeafPage(2)
@@ -289,9 +281,6 @@ func TestMergeLeaf(t *testing.T) {
 		t.Fatalf("right.NumEntries() = %d, want 0 (right should be empty after merge)", right.NumEntries())
 	}
 
-	// left's chain pointer should now skip over right, pointing
-	// straight at rightsRight. This is what a real caller reads to
-	// know there's a third page needing its PrevLeafPageID patched.
 	if left.NextLeafPageID() != rightsRight.ID {
 		t.Errorf("left.NextLeafPageID() = %d, want %d (rightsRight)", left.NextLeafPageID(), rightsRight.ID)
 	}

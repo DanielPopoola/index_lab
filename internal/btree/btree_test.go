@@ -163,9 +163,6 @@ func TestInsertTriggersMultiLevelSplit(t *testing.T) {
 		t.Fatalf("expected root to be InternalPage after %d inserts, got PageType=%v", numKeys, rootPage.PageType())
 	}
 
-	// The real signal that a SECOND-level split happened: the root's
-	// leftmost child should itself be an internal page, not a leaf.
-	// If only one split ever happened, root -> leaf directly.
 	leftmostChild, err := tree.pm.ReadPage(rootPage.LeftmostChildPageID())
 	if err != nil {
 		t.Fatalf("ReadPage(root's leftmost child) failed: %v", err)
@@ -174,8 +171,6 @@ func TestInsertTriggersMultiLevelSplit(t *testing.T) {
 		t.Fatalf("expected root's leftmost child to be InternalPage (proof of a second split level), got PageType=%v", leftmostChild.PageType())
 	}
 
-	// Spot-check correctness rather than searching all 45000 keys, to
-	// keep the test fast: first, last, middle, and a few scattered.
 	spotChecks := []int64{0, 1, numKeys / 4, numKeys / 2, (3 * numKeys) / 4, numKeys - 1}
 	for _, key := range spotChecks {
 		gotRecordID, found := tree.Search(key)
@@ -210,9 +205,6 @@ func TestDeleteTriggersMultiLevelCascade(t *testing.T) {
 		}
 	}
 
-	// Same multi-level confirmation as TestInsertTriggersMultiLevelSplit
-	// — establish we're starting from a real 3-level tree before we
-	// start deleting from it.
 	rootPage, err := tree.pm.ReadPage(tree.rootID)
 	if err != nil {
 		t.Fatalf("ReadPage(root) failed: %v", err)
@@ -228,10 +220,6 @@ func TestDeleteTriggersMultiLevelCascade(t *testing.T) {
 		t.Fatalf("setup problem: expected root's leftmost child to be InternalPage (3-level tree), got PageType=%v", leftmostChild.PageType())
 	}
 
-	// Delete a large contiguous block from the low end — roughly 44%
-	// of the tree. Large and contiguous so many leaves in the same
-	// area empty out together, forcing repeated leaf merges that
-	// cascade into internal-page merges, and likely root-shrink.
 	const deleteUpTo = 20000 // delete keys [0, deleteUpTo)
 
 	for i := int64(0); i < deleteUpTo; i++ {
@@ -248,11 +236,6 @@ func TestDeleteTriggersMultiLevelCascade(t *testing.T) {
 		}
 	}
 
-	// Surviving keys — everything from deleteUpTo to numKeys — must
-	// still be intact, with correct recordIDs. This is what actually
-	// proves the cascade didn't corrupt anything: separators, sibling
-	// pointers, and root/internal structure all still route searches
-	// correctly after multiple rounds of merging.
 	survivingSpotChecks := []int64{
 		deleteUpTo,
 		deleteUpTo + 1,
@@ -271,9 +254,6 @@ func TestDeleteTriggersMultiLevelCascade(t *testing.T) {
 		}
 	}
 
-	// The tree should still work after reopening — proves the cascade
-	// (including any root-shrink) correctly persisted rootID via the
-	// metadata page, not just left the in-memory tree correct.
 	if err := tree.Close(); err != nil {
 		t.Fatalf("Close failed: %v", err)
 	}
@@ -417,6 +397,96 @@ func TestLeafChainCorrectAfterNonSequentialInserts(t *testing.T) {
 	}
 }
 
+func TestUniqueIndexRejectsDuplicate(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	tree, err := OpenUnique(dbPath)
+	if err != nil {
+		t.Fatalf("OpenUnique failed: %v", err)
+	}
+	defer tree.Close()
+
+	if err := tree.Insert(42, 100); err != nil {
+		t.Fatalf("first Insert(42) failed: %v", err)
+	}
+
+	err = tree.Insert(42, 999)
+	if err != ErrDuplicateKey {
+		t.Fatalf("second Insert(42) error = %v, want ErrDuplicateKey", err)
+	}
+
+	// The original value must be untouched — a rejected duplicate
+	// insert must not have partially overwritten anything.
+	got, found := tree.Search(42)
+	if !found {
+		t.Fatalf("Search(42) not found after rejected duplicate insert")
+	}
+	if got != 100 {
+		t.Fatalf("Search(42) = %d, want 100 (original value should survive a rejected duplicate insert)", got)
+	}
+}
+
+func TestOrdinaryIndexStillAllowsDuplicates(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	tree, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer tree.Close()
+
+	if err := tree.Insert(7, 111); err != nil {
+		t.Fatalf("first Insert(7) failed: %v", err)
+	}
+	if err := tree.Insert(7, 222); err != nil {
+		t.Fatalf("second Insert(7) on a non-unique tree failed: %v (should be allowed)", err)
+	}
+}
+
+func TestUniqueIndexRejectsDuplicateAcrossLeafSplit(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	tree, err := OpenUnique(dbPath)
+	if err != nil {
+		t.Fatalf("OpenUnique failed: %v", err)
+	}
+	defer tree.Close()
+
+	const numKeys = 500
+	for i := int64(0); i < numKeys; i++ {
+		if err := tree.Insert(i, i*10); err != nil {
+			t.Fatalf("Insert(%d) failed: %v", i, err)
+		}
+	}
+
+	rootPage, err := tree.pm.ReadPage(tree.rootID)
+	if err != nil {
+		t.Fatalf("ReadPage(root) failed: %v", err)
+	}
+	if rootPage.PageType() != page.InternalPage {
+		t.Fatalf("setup problem: expected a multi-page tree after %d inserts, got a single leaf root", numKeys)
+	}
+
+	// Try re-inserting a key from early in the range, the middle, and
+	// the end — different leaves post-split.
+	for _, dup := range []int64{0, numKeys / 2, numKeys - 1} {
+		err := tree.Insert(dup, 99999)
+		if err != ErrDuplicateKey {
+			t.Fatalf("Insert(%d) [duplicate, post-split] error = %v, want ErrDuplicateKey", dup, err)
+		}
+		got, found := tree.Search(dup)
+		if !found || got != dup*10 {
+			t.Fatalf("Search(%d) after rejected duplicate = (%d, %v), want (%d, true)", dup, got, found, dup*10)
+		}
+	}
+
+	// A genuinely new key must still insert successfully — the
+	// uniqueness check shouldn't be rejecting everything.
+	if err := tree.Insert(numKeys+1, 12345); err != nil {
+		t.Fatalf("Insert of a genuinely new key failed: %v", err)
+	}
+}
+
 func TestScan(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 
@@ -426,11 +496,6 @@ func TestScan(t *testing.T) {
 	}
 	defer tree.Close()
 
-	// Enough keys to force at least one leaf split, so these tests
-	// actually exercise NextLeafPageID-following, not just a
-	// single-leaf linear scan. Even keys only (0, 2, 4, ...) so we can
-	// also test scanning across a gap (odd startKey/endKey values that
-	// don't exactly match a stored key).
 	const numKeys = 500
 	for i := int64(0); i < numKeys; i++ {
 		key := i * 2

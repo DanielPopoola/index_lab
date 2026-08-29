@@ -2,8 +2,6 @@ package btree
 
 import "testing"
 
-// TestEncodeDecodeRoundTrip proves DecodeInt64(EncodeInt64(n)) == n for a
-// range of values — positive, negative, and zero.
 func TestEncodeDecodeRoundTrip(t *testing.T) {
 	values := []int64{
 		0,
@@ -24,9 +22,6 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 	}
 }
 
-// TestCompareKeysOrdering proves that comparing ENCODED bytes gives the
-// same ordering as comparing the original int64 values — this is the
-// case that would break WITHOUT the sign-bit flip: negative vs positive.
 func TestCompareKeysOrdering(t *testing.T) {
 	tests := []struct {
 		a, b     int64

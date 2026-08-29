@@ -40,10 +40,6 @@ func TestCompositeInsertAndSearch(t *testing.T) {
 		}
 	}
 
-	// A key that only differs in columnB from a real entry must NOT be
-	// found — this is exactly what a findKeyIndex bug comparing only
-	// columnA's bytes (the old [:8] hardcoding) would get wrong: it
-	// would report (1, 99) as matching (1, 10)'s position or worse.
 	if _, found := tree.Search(1, 99); found {
 		t.Fatalf("Search(1, 99) unexpectedly found — columnB is not being compared")
 	}
@@ -54,10 +50,6 @@ func TestCompositeInsertAndSearch(t *testing.T) {
 }
 
 func TestCompositeOrderingWithSharedColumnA(t *testing.T) {
-	// Entries deliberately inserted out of order, and with several
-	// pairs sharing columnA but differing columnB — if findKeyIndex or
-	// findChildPageID only ever compared the first 8 bytes (columnA),
-	// entries here would be misplaced or misidentified as duplicates.
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 
 	tree, err := OpenComposite(dbPath)
@@ -101,13 +93,6 @@ func TestCompositeInsertTriggersSplit(t *testing.T) {
 	}
 	defer tree.Close()
 
-	// CompositeEntrySize=24 bytes/entry vs the single-column tree's 16
-	// means fewer entries fit per page, so a split happens sooner.
-	// Insert enough to force at least one leaf split, then confirm
-	// every entry is still findable — the old splitLeaf bug
-	// (separatorKey = newPage.GetEntry(0)[:8]) would silently truncate
-	// the separator to just columnA's bytes, corrupting comparisons
-	// against anything inserted after the split.
 	const numGroups = 50
 	const perGroup = 3 // columnB = 10, 20, 30 within each columnA group
 
@@ -145,10 +130,6 @@ func TestCompositeDeleteTriggersUnderflowHandling(t *testing.T) {
 	}
 	defer tree.Close()
 
-	// Enough entries to build a multi-page tree, then delete most of
-	// them to force redistribution/merging — exercising
-	// redistributeFromLeft/Right and mergeLeaf's composite-aware
-	// separator-key math, not just the split path.
 	const numGroups = 60
 	const perGroup = 3
 
@@ -175,17 +156,13 @@ func TestCompositeDeleteTriggersUnderflowHandling(t *testing.T) {
 		}
 	}
 
-	// Deleted entries must be gone.
 	for i := 0; i < deleteCount; i++ {
 		k := allKeys[i]
 		if _, found := tree.Search(k.a, k.b); found {
 			t.Fatalf("Search(%d, %d) found after delete", k.a, k.b)
 		}
 	}
-	// Remaining entries must still be correct — this is what would
-	// catch a corrupted separator key from a bad redistribution/merge:
-	// entries would become unreachable even though DeleteEntry never
-	// touched them.
+
 	for i := deleteCount; i < len(allKeys); i++ {
 		k := allKeys[i]
 		want := k.a*1000 + k.b
@@ -208,10 +185,6 @@ func TestCompositeScanFixedColumnA(t *testing.T) {
 	}
 	defer tree.Close()
 
-	// Multiple columnA groups, interleaved insertion order, enough
-	// volume to span several leaves — Scan(columnA, ...) must return
-	// only that columnA's entries, in columnB order, regardless of
-	// what's stored before/after it in the tree.
 	const numGroups = 40
 	const perGroup = 20 // columnB = 10, 20, ..., 200
 
@@ -312,10 +285,6 @@ func TestCompositeBTreeSurvivesReopenAfterSplit(t *testing.T) {
 		}
 	}
 
-	// A fresh insert after reopening must still respect ordering and
-	// be findable — confirms the reopened tree's entrySize (24, not
-	// the single-column default 16) was correctly restored, since a
-	// wrong entrySize would corrupt capacity/split decisions from here.
 	if err := tree2.Insert(999, 1, 12345); err != nil {
 		t.Fatalf("Insert after reopen failed: %v", err)
 	}
@@ -326,10 +295,6 @@ func TestCompositeBTreeSurvivesReopenAfterSplit(t *testing.T) {
 }
 
 func TestCompositeInsertDuplicateKeyDifferentColumnB(t *testing.T) {
-	// Same columnA, different columnB should never collide — this is
-	// the single most direct test of "columnB actually participates in
-	// comparisons." If it didn't, the second Insert here would either
-	// silently overwrite the first entry's slot or corrupt ordering.
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 
 	tree, err := OpenComposite(dbPath)
