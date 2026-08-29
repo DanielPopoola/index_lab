@@ -1,10 +1,10 @@
-// Package btree implements a persistent B+ tree on top of the page and
-// storage packages.
+// Package btree implements a persistent B+ tree.
 package btree
 
 import (
 	"errors"
 
+	"github.com/DanielPopoola/index_lab/internal/buffer"
 	"github.com/DanielPopoola/index_lab/internal/page"
 	"github.com/DanielPopoola/index_lab/internal/storage"
 )
@@ -12,9 +12,10 @@ import (
 var ErrInvalidRange = errors.New("start key must be less than end key")
 var ErrDuplicateKey = errors.New("key already exists in unique index")
 
-// BTree is a persistent B+ tree backed by a single database file.
+// BTree is a persistent B+ tree backed by a database file.
 type BTree struct {
 	pm         *storage.PageManager
+	pool       *buffer.Pool
 	rootID     page.PageID
 	entrySize  uint16
 	unique     bool
@@ -22,22 +23,38 @@ type BTree struct {
 	pageMerges uint64
 }
 
-// Open opens or creates a B+ tree at path.
-func Open(path string) (*BTree, error) {
-	return openWith(path, 16, false)
+// Option configures a BTree at Open time.
+type Option func(*BTree)
+
+// WithBufferPool enables an LRU page cache for the tree.
+func WithBufferPool(capacity int) Option {
+	return func(t *BTree) {
+		t.pool = buffer.NewPool(t.pm, capacity)
+	}
 }
 
-// OpenUnique opens or creates a B+ tree at path with a uniqueness constraint.
+// Open creates or opens a B+ tree at path.
+func Open(path string, opts ...Option) (*BTree, error) {
+	return openWith(path, 16, false, opts...)
+}
+
+// OpenUnique creates or opens a unique B+ tree at path.
+//
 // Insert fails with ErrDuplicateKey if the key already exists.
-func OpenUnique(path string) (*BTree, error) {
-	return openWith(path, 16, true)
+func OpenUnique(path string, opts ...Option) (*BTree, error) {
+	return openWith(path, 16, true, opts...)
 }
 
 // openWith sets up file and metadata for all BTree constructor variants.
-func openWith(path string, entrySize uint16, unique bool) (*BTree, error) {
+func openWith(path string, entrySize uint16, unique bool, opts ...Option) (*BTree, error) {
 	pm, err := storage.Open(path)
 	if err != nil {
 		return nil, err
+	}
+
+	t := &BTree{pm: pm, entrySize: entrySize, unique: unique}
+	for _, opt := range opts {
+		opt(t)
 	}
 
 	var rootID page.PageID
@@ -49,25 +66,55 @@ func openWith(path string, entrySize uint16, unique bool) (*BTree, error) {
 		rootID = firstLeaf.ID
 
 		metaPage := page.NewMetadataPage(0, rootID)
-		if err := pm.WritePage(metaPage); err != nil {
+		if err := t.writePage(metaPage); err != nil {
 			return nil, err
 		}
-		if err := pm.WritePage(firstLeaf); err != nil {
+		if err := t.writePage(firstLeaf); err != nil {
 			return nil, err
 		}
 	} else {
-		metaPage, err := pm.ReadPage(0)
+		metaPage, err := t.readPage(0)
 		if err != nil {
 			return nil, err
 		}
 		rootID = metaPage.RootPageID()
 	}
 
-	return &BTree{pm: pm, rootID: rootID, entrySize: entrySize, unique: unique}, nil
+	t.rootID = rootID
+	return t, nil
 }
 
-// Close closes the underlying PageManager.
+// readPage loads a page by ID.
+//
+// If a buffer pool is configured, it reads through that cache; otherwise it
+// reads directly from the PageManager.
+func (t *BTree) readPage(id page.PageID) (*page.Page, error) {
+	if t.pool != nil {
+		return t.pool.GetPage(id)
+	}
+	return t.pm.ReadPage(id)
+}
+
+// writePage persists p to storage.
+//
+// If a buffer pool is configured, the page is cached and marked dirty; the
+// actual disk write is deferred until eviction or Close. Without a pool, the
+// page is written directly to the PageManager.
+func (t *BTree) writePage(p *page.Page) error {
+	if t.pool != nil {
+		return t.pool.Put(p.ID, p)
+	}
+	return t.pm.WritePage(p)
+}
+
+// Close closes the tree.
+//
+// If a buffer pool is configured, it flushes dirty pages before closing the
+// underlying PageManager.
 func (t *BTree) Close() error {
+	if t.pool != nil {
+		return t.pool.Close()
+	}
 	return t.pm.Close()
 }
 
@@ -88,7 +135,7 @@ func (t *BTree) Insert(key int64, recordID int64) error {
 
 	err = Insert(leaf, key, recordID)
 	if err == nil {
-		return t.pm.WritePage(leaf)
+		return t.writePage(leaf)
 	}
 	if err != ErrPageFull {
 		return err
@@ -112,10 +159,10 @@ func (t *BTree) Insert(key int64, recordID int64) error {
 		return err
 	}
 
-	if err := t.pm.WritePage(leaf); err != nil {
+	if err := t.writePage(leaf); err != nil {
 		return err
 	}
-	if err := t.pm.WritePage(newLeaf); err != nil {
+	if err := t.writePage(newLeaf); err != nil {
 		return err
 	}
 
@@ -177,7 +224,7 @@ func (t *BTree) Scan(startKey, endKey int64) ([]ScanResult, error) {
 			return results, nil
 		}
 
-		leaf, err = t.pm.ReadPage(nextID)
+		leaf, err = t.readPage(nextID)
 		if err != nil {
 			return nil, err
 		}
@@ -200,11 +247,11 @@ func (t *BTree) Delete(key int64) error {
 
 	// Root leaf has no minimum occupancy — nothing below can fire.
 	if len(ancestors) == 0 {
-		return t.pm.WritePage(leaf)
+		return t.writePage(leaf)
 	}
 
 	if leaf.NumEntries() >= page.MinEntries(t.entrySize) {
-		return t.pm.WritePage(leaf)
+		return t.writePage(leaf)
 	}
 
 	return t.fixLeafUnderflow(leaf, ancestors)
@@ -212,7 +259,7 @@ func (t *BTree) Delete(key int64) error {
 
 // findLeafWithPath walks root-to-leaf and returns the leaf and all ancestor page IDs.
 func (t *BTree) findLeafWithPath(encodedKey []byte) (leaf *page.Page, ancestors []page.PageID, err error) {
-	p, err := t.pm.ReadPage(t.rootID)
+	p, err := t.readPage(t.rootID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -221,7 +268,7 @@ func (t *BTree) findLeafWithPath(encodedKey []byte) (leaf *page.Page, ancestors 
 		ancestors = append(ancestors, p.ID)
 
 		childID := findChildPageID(p, encodedKey)
-		p, err = t.pm.ReadPage(childID)
+		p, err = t.readPage(childID)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -232,20 +279,20 @@ func (t *BTree) findLeafWithPath(encodedKey []byte) (leaf *page.Page, ancestors 
 
 // fixLeafUnderflow fixes underflowing leaf by redistribution or merge.
 func (t *BTree) fixLeafUnderflow(leaf *page.Page, ancestors []page.PageID) error {
-	parent, err := t.pm.ReadPage(ancestors[len(ancestors)-1])
+	parent, err := t.readPage(ancestors[len(ancestors)-1])
 	if err != nil {
 		return err
 	}
 
 	var leftPage, rightPage *page.Page
 	if leaf.PrevLeafPageID() != 0 {
-		leftPage, err = t.pm.ReadPage(leaf.PrevLeafPageID())
+		leftPage, err = t.readPage(leaf.PrevLeafPageID())
 		if err != nil {
 			return err
 		}
 	}
 	if leaf.NextLeafPageID() != 0 {
-		rightPage, err = t.pm.ReadPage(leaf.NextLeafPageID())
+		rightPage, err = t.readPage(leaf.NextLeafPageID())
 		if err != nil {
 			return err
 		}
@@ -271,13 +318,13 @@ func (t *BTree) redistributeLeafFromLeft(leaf, leftPage, parent *page.Page) erro
 	entryBytes := append(append([]byte{}, newSeparator...), encodeChildID(leaf.ID)...)
 	parent.InsertEntry(idx, entryBytes)
 
-	if err := t.pm.WritePage(leaf); err != nil {
+	if err := t.writePage(leaf); err != nil {
 		return err
 	}
-	if err := t.pm.WritePage(leftPage); err != nil {
+	if err := t.writePage(leftPage); err != nil {
 		return err
 	}
-	return t.pm.WritePage(parent)
+	return t.writePage(parent)
 }
 
 // redistributeLeafFromRight borrows one entry from rightPage for leaf.
@@ -288,13 +335,13 @@ func (t *BTree) redistributeLeafFromRight(leaf, rightPage, parent *page.Page) er
 	entryBytes := append(append([]byte{}, newSeparator...), encodeChildID(rightPage.ID)...)
 	parent.InsertEntry(idx, entryBytes)
 
-	if err := t.pm.WritePage(leaf); err != nil {
+	if err := t.writePage(leaf); err != nil {
 		return err
 	}
-	if err := t.pm.WritePage(rightPage); err != nil {
+	if err := t.writePage(rightPage); err != nil {
 		return err
 	}
-	return t.pm.WritePage(parent)
+	return t.writePage(parent)
 }
 
 // mergeLeafWithLeft merges leaf into its left sibling.
@@ -302,18 +349,18 @@ func (t *BTree) mergeLeafWithLeft(leaf, leftPage, parent *page.Page, ancestors [
 	mergeLeaf(leftPage, leaf)
 	t.pageMerges++
 	if leftPage.NextLeafPageID() != 0 {
-		rightPage, err := t.pm.ReadPage(leftPage.NextLeafPageID())
+		rightPage, err := t.readPage(leftPage.NextLeafPageID())
 		if err != nil {
 			return err
 		}
 		rightPage.SetPrevLeafPageID(leftPage.ID)
-		if err := t.pm.WritePage(rightPage); err != nil {
+		if err := t.writePage(rightPage); err != nil {
 			return err
 		}
 	}
 	idx, _ := findChildIndex(parent, leaf.ID)
 	parent.DeleteEntry(idx)
-	if err := t.pm.WritePage(leftPage); err != nil {
+	if err := t.writePage(leftPage); err != nil {
 		return err
 	}
 	return t.finishInternalMerge(parent, ancestors)
@@ -324,18 +371,18 @@ func (t *BTree) mergeLeafWithRight(leaf, rightPage, parent *page.Page, ancestors
 	mergeLeaf(leaf, rightPage)
 	t.pageMerges++
 	if leaf.NextLeafPageID() != 0 {
-		nextPage, err := t.pm.ReadPage(leaf.NextLeafPageID())
+		nextPage, err := t.readPage(leaf.NextLeafPageID())
 		if err != nil {
 			return err
 		}
 		nextPage.SetPrevLeafPageID(leaf.ID)
-		if err := t.pm.WritePage(nextPage); err != nil {
+		if err := t.writePage(nextPage); err != nil {
 			return err
 		}
 	}
 	idx, _ := findChildIndex(parent, rightPage.ID)
 	parent.DeleteEntry(idx)
-	if err := t.pm.WritePage(leaf); err != nil {
+	if err := t.writePage(leaf); err != nil {
 		return err
 	}
 	return t.finishInternalMerge(parent, ancestors)
@@ -348,12 +395,12 @@ func (t *BTree) updateNextLeafPrevLink(newLeaf *page.Page) error {
 		return nil
 	}
 
-	nextLeaf, err := t.pm.ReadPage(nextID)
+	nextLeaf, err := t.readPage(nextID)
 	if err != nil {
 		return err
 	}
 	nextLeaf.SetPrevLeafPageID(newLeaf.ID)
-	return t.pm.WritePage(nextLeaf)
+	return t.writePage(nextLeaf)
 }
 
 // fixInternalUnderflow fixes underflowing internal page by redistribution or merge.
@@ -362,16 +409,16 @@ func (t *BTree) fixInternalUnderflow(node *page.Page, ancestors []page.PageID) e
 		if node.NumEntries() == 0 {
 			childID := node.LeftmostChildPageID()
 			metaPage := page.NewMetadataPage(0, childID)
-			if err := t.pm.WritePage(metaPage); err != nil {
+			if err := t.writePage(metaPage); err != nil {
 				return err
 			}
 			t.rootID = childID
 			return nil
 		}
-		return t.pm.WritePage(node)
+		return t.writePage(node)
 	}
 
-	grandparent, err := t.pm.ReadPage(ancestors[len(ancestors)-1])
+	grandparent, err := t.readPage(ancestors[len(ancestors)-1])
 	if err != nil {
 		return err
 	}
@@ -380,13 +427,13 @@ func (t *BTree) fixInternalUnderflow(node *page.Page, ancestors []page.PageID) e
 
 	var leftSibling, rightSibling *page.Page
 	if leftID != 0 {
-		leftSibling, err = t.pm.ReadPage(leftID)
+		leftSibling, err = t.readPage(leftID)
 		if err != nil {
 			return err
 		}
 	}
 	if rightID != 0 {
-		rightSibling, err = t.pm.ReadPage(rightID)
+		rightSibling, err = t.readPage(rightID)
 		if err != nil {
 			return err
 		}
@@ -415,13 +462,13 @@ func (t *BTree) redistributeInternalNodeFromLeft(node, leftSibling, grandparent 
 	entryBytes := append(append([]byte{}, newSeparator...), encodeChildID(node.ID)...)
 	grandparent.InsertEntry(idx, entryBytes)
 
-	if err := t.pm.WritePage(node); err != nil {
+	if err := t.writePage(node); err != nil {
 		return err
 	}
-	if err := t.pm.WritePage(leftSibling); err != nil {
+	if err := t.writePage(leftSibling); err != nil {
 		return err
 	}
-	return t.pm.WritePage(grandparent)
+	return t.writePage(grandparent)
 }
 
 // redistributeInternalNodeFromRight borrows one entry from rightSibling for node.
@@ -435,13 +482,13 @@ func (t *BTree) redistributeInternalNodeFromRight(node, rightSibling, grandparen
 	entryBytes := append(append([]byte{}, newSeparator...), encodeChildID(rightSibling.ID)...)
 	grandparent.InsertEntry(idx, entryBytes)
 
-	if err := t.pm.WritePage(node); err != nil {
+	if err := t.writePage(node); err != nil {
 		return err
 	}
-	if err := t.pm.WritePage(rightSibling); err != nil {
+	if err := t.writePage(rightSibling); err != nil {
 		return err
 	}
-	return t.pm.WritePage(grandparent)
+	return t.writePage(grandparent)
 }
 
 // mergeInternalWithLeft merges node into its left sibling.
@@ -453,7 +500,7 @@ func (t *BTree) mergeInternalWithLeft(node, leftSibling, grandparent *page.Page,
 	t.pageMerges++
 	grandparent.DeleteEntry(idx)
 
-	if err := t.pm.WritePage(leftSibling); err != nil {
+	if err := t.writePage(leftSibling); err != nil {
 		return err
 	}
 
@@ -469,7 +516,7 @@ func (t *BTree) mergeInternalWithRight(node, rightSibling, grandparent *page.Pag
 	t.pageMerges++
 	grandparent.DeleteEntry(idx)
 
-	if err := t.pm.WritePage(node); err != nil {
+	if err := t.writePage(node); err != nil {
 		return err
 	}
 
@@ -480,11 +527,11 @@ func (t *BTree) mergeInternalWithRight(node, rightSibling, grandparent *page.Pag
 func (t *BTree) finishInternalMerge(grandparent *page.Page, ancestors []page.PageID) error {
 	isRoot := len(ancestors) == 1 // grandparent's OWN ancestors would be empty
 	if !isRoot && grandparent.NumEntries() >= page.MinEntries(t.entrySize) {
-		return t.pm.WritePage(grandparent)
+		return t.writePage(grandparent)
 	}
 	if isRoot && grandparent.NumEntries() > 0 {
 		// Root, but not shrunk to a single child — no minimum applies.
-		return t.pm.WritePage(grandparent)
+		return t.writePage(grandparent)
 	}
 	return t.fixInternalUnderflow(grandparent, ancestors[:len(ancestors)-1])
 }
@@ -496,7 +543,7 @@ func (t *BTree) propagateSplit(p, newPage *page.Page, separatorKey []byte, ances
 		newRoot := page.NewInternalPage(newRootPage.ID, p.ID)
 		entryBytes := append(append([]byte{}, separatorKey...), encodeChildID(newPage.ID)...)
 		newRoot.InsertEntry(0, entryBytes)
-		if err := t.pm.WritePage(newRoot); err != nil {
+		if err := t.writePage(newRoot); err != nil {
 			return err
 		}
 
@@ -504,7 +551,7 @@ func (t *BTree) propagateSplit(p, newPage *page.Page, separatorKey []byte, ances
 		// 0) so a future Open recovers the real root instead of the
 		// stale one.
 		metaPage := page.NewMetadataPage(0, newRoot.ID)
-		if err := t.pm.WritePage(metaPage); err != nil {
+		if err := t.writePage(metaPage); err != nil {
 			return err
 		}
 
@@ -515,7 +562,7 @@ func (t *BTree) propagateSplit(p, newPage *page.Page, separatorKey []byte, ances
 	parentID := ancestors[len(ancestors)-1]
 	remaining := ancestors[:len(ancestors)-1]
 
-	parent, err := t.pm.ReadPage(parentID)
+	parent, err := t.readPage(parentID)
 	if err != nil {
 		return err
 	}
@@ -525,7 +572,7 @@ func (t *BTree) propagateSplit(p, newPage *page.Page, separatorKey []byte, ances
 	if parent.HasSpaceFor(len(entryBytes)) {
 		idx, _ := findKeyIndex(parent, separatorKey)
 		parent.InsertEntry(idx, entryBytes)
-		return t.pm.WritePage(parent)
+		return t.writePage(parent)
 	}
 
 	var parentSeparator []byte
@@ -553,10 +600,10 @@ func (t *BTree) propagateSplit(p, newPage *page.Page, separatorKey []byte, ances
 		parent.InsertEntry(idx, entryBytes)
 	}
 
-	if err := t.pm.WritePage(parent); err != nil {
+	if err := t.writePage(parent); err != nil {
 		return err
 	}
-	if err := t.pm.WritePage(newParent); err != nil {
+	if err := t.writePage(newParent); err != nil {
 		return err
 	}
 
