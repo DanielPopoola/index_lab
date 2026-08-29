@@ -41,7 +41,7 @@ func RunReadExperiments(dir string, n int) ([]ReadResult, error) {
 	mid := n / 2
 	for i := 0; i < n; i++ {
 		key := int64(i)
-		row := []byte(fmt.Sprintf("row-%d", i))
+		row := fmt.Appendf(nil, "row-%d", i)
 		recordID, err := h.Put(row)
 		if err != nil {
 			return nil, err
