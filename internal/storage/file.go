@@ -14,6 +14,8 @@ import (
 type PageManager struct {
 	file       *os.File
 	nextPageID page.PageID
+	pageReads  uint64
+	pageWrites uint64
 }
 
 // Open opens the database file at path, creating it if absent.
@@ -55,6 +57,8 @@ func (pm *PageManager) AllocatePage() *page.Page {
 
 // ReadPage reads the page at id from disk.
 func (pm *PageManager) ReadPage(id page.PageID) (*page.Page, error) {
+	pm.pageReads++
+
 	offset := int64(id) * page.PageSize
 	if _, err := pm.file.Seek(offset, io.SeekStart); err != nil {
 		return nil, err
@@ -69,6 +73,8 @@ func (pm *PageManager) ReadPage(id page.PageID) (*page.Page, error) {
 
 // WritePage writes p to disk at the offset corresponding to p.ID.
 func (pm *PageManager) WritePage(p *page.Page) error {
+	pm.pageWrites++
+
 	offset := int64(p.ID) * page.PageSize
 	if _, err := pm.file.Seek(offset, io.SeekStart); err != nil {
 		return err
@@ -77,6 +83,24 @@ func (pm *PageManager) WritePage(p *page.Page) error {
 		return err
 	}
 	return nil
+}
+
+// PageReads returns the number of ReadPage calls made so far.
+func (pm *PageManager) PageReads() uint64 {
+	return pm.pageReads
+}
+
+// PageWrites returns the number of WritePage calls made so far.
+func (pm *PageManager) PageWrites() uint64 {
+	return pm.pageWrites
+}
+
+// ResetStats zeroes the read/write counters, without affecting
+// nextPageID or any on-disk content — for starting a fresh
+// measurement window between experiments.
+func (pm *PageManager) ResetStats() {
+	pm.pageReads = 0
+	pm.pageWrites = 0
 }
 
 // PageCount returns the number of pages allocated so far.

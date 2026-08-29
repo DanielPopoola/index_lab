@@ -14,10 +14,12 @@ var ErrDuplicateKey = errors.New("key already exists in unique index")
 
 // BTree is a persistent B+ tree backed by a single database file.
 type BTree struct {
-	pm        *storage.PageManager
-	rootID    page.PageID
-	entrySize uint16
-	unique    bool
+	pm         *storage.PageManager
+	rootID     page.PageID
+	entrySize  uint16
+	unique     bool
+	pageSplits uint64
+	pageMerges uint64
 }
 
 // Open opens or creates a B+ tree at path.
@@ -96,6 +98,7 @@ func (t *BTree) Insert(key int64, recordID int64) error {
 	if err != nil {
 		return err
 	}
+	t.pageSplits++
 	if err := t.updateNextLeafPrevLink(newLeaf); err != nil {
 		return err
 	}
@@ -297,6 +300,7 @@ func (t *BTree) redistributeLeafFromRight(leaf, rightPage, parent *page.Page) er
 // mergeLeafWithLeft merges leaf into its left sibling.
 func (t *BTree) mergeLeafWithLeft(leaf, leftPage, parent *page.Page, ancestors []page.PageID) error {
 	mergeLeaf(leftPage, leaf)
+	t.pageMerges++
 	if leftPage.NextLeafPageID() != 0 {
 		rightPage, err := t.pm.ReadPage(leftPage.NextLeafPageID())
 		if err != nil {
@@ -318,6 +322,7 @@ func (t *BTree) mergeLeafWithLeft(leaf, leftPage, parent *page.Page, ancestors [
 // mergeLeafWithRight merges rightPage into leaf.
 func (t *BTree) mergeLeafWithRight(leaf, rightPage, parent *page.Page, ancestors []page.PageID) error {
 	mergeLeaf(leaf, rightPage)
+	t.pageMerges++
 	if leaf.NextLeafPageID() != 0 {
 		nextPage, err := t.pm.ReadPage(leaf.NextLeafPageID())
 		if err != nil {
@@ -445,6 +450,7 @@ func (t *BTree) mergeInternalWithLeft(node, leftSibling, grandparent *page.Page,
 	separator := grandparent.GetEntry(idx)[:8]
 
 	mergeInternal(leftSibling, node, separator)
+	t.pageMerges++
 	grandparent.DeleteEntry(idx)
 
 	if err := t.pm.WritePage(leftSibling); err != nil {
@@ -460,6 +466,7 @@ func (t *BTree) mergeInternalWithRight(node, rightSibling, grandparent *page.Pag
 	separator := grandparent.GetEntry(idx)[:8]
 
 	mergeInternal(node, rightSibling, separator)
+	t.pageMerges++
 	grandparent.DeleteEntry(idx)
 
 	if err := t.pm.WritePage(node); err != nil {
@@ -534,6 +541,7 @@ func (t *BTree) propagateSplit(p, newPage *page.Page, separatorKey []byte, ances
 	if err != nil {
 		return err
 	}
+	t.pageSplits++
 
 	// Decide which half of the split parent should receive
 	// (separatorKey, newPage.ID), same idea as the leaf case in Insert.

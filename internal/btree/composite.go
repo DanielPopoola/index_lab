@@ -60,6 +60,7 @@ func (c *CompositeBTree) Insert(columnA, columnB, recordID int64) error {
 			if splitErr != nil {
 				return splitErr
 			}
+			c.tree.pageSplits++
 			if err := c.tree.updateNextLeafPrevLink(newLeaf); err != nil {
 				return err
 			}
