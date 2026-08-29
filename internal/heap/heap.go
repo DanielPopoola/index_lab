@@ -1,13 +1,4 @@
-// Package heap implements a minimal row heap: a flat, append-only store
-// where a RecordID is a physical address (page + slot), not a search
-// key. Looking up a row given its RecordID is pure arithmetic plus one
-// page read — never a search — mirroring how a Postgres TID resolves
-// straight to a heap tuple's physical location.
-//
-// The heap knows nothing about the B+ tree, and the B+ tree knows
-// nothing about the heap: they're connected only by the RecordID
-// values the tree stores as leaf entry values and the heap hands back
-// from Put.
+// Package heap implements a flat, append-only store where RecordID is a physical address.
 package heap
 
 import (
@@ -19,14 +10,13 @@ import (
 
 var ErrRowTooLarge = errors.New("heap: row too large to fit in a single page")
 
-// Heap is a flat collection of pages holding opaque row bytes, backed
-// by its own database file (a separate PageManager from the B+ tree's).
+// Heap is a collection of pages holding opaque row bytes.
 type Heap struct {
 	pm         *storage.PageManager
 	activePage *page.Page // the page new rows are currently appended to
 }
 
-// Open opens (or creates) the heap file at path.
+// Open opens or creates the heap file at path.
 func Open(path string) (*Heap, error) {
 	pm, err := storage.Open(path)
 	if err != nil {
@@ -53,14 +43,12 @@ func Open(path string) (*Heap, error) {
 	return h, nil
 }
 
-// Close closes the underlying heap file.
+// Close closes the underlying file.
 func (h *Heap) Close() error {
 	return h.pm.Close()
 }
 
-// Put stores rowBytes and returns a RecordID that can later be passed
-// to Get to retrieve it. The RecordID encodes a physical address
-// (PageID and slot index) — decoding it requires no search.
+// Put stores rowBytes and returns a RecordID for later retrieval.
 func (h *Heap) Put(rowBytes []byte) (recordID int64, err error) {
 	if page.HeaderSize+page.SlotSize+len(rowBytes) > page.PageSize {
 		return 0, ErrRowTooLarge
@@ -82,8 +70,6 @@ func (h *Heap) Put(rowBytes []byte) (recordID int64, err error) {
 }
 
 // Get retrieves the row bytes previously stored at recordID.
-// No search is performed: recordID is decoded directly into a page
-// number and slot index.
 func (h *Heap) Get(recordID int64) ([]byte, error) {
 	pageID := page.PageID(uint64(recordID) / uint64(page.PageSize))
 	slotIndex := uint16(uint64(recordID) % uint64(page.PageSize))

@@ -5,15 +5,12 @@ import (
 	"github.com/DanielPopoola/index_lab/internal/storage"
 )
 
-// CompositeBTree wraps a *BTree configured for 16-byte composite keys
-// (two int64 columns instead of one).
+// CompositeBTree is a B+ tree configured for 16-byte composite keys.
 type CompositeBTree struct {
 	tree *BTree
 }
 
 // OpenComposite opens or creates a composite-key B+ tree at path.
-// Mirrors Open, but configures the underlying *BTree with
-// CompositeEntrySize instead of the default single-column EntrySize.
 func OpenComposite(path string) (*CompositeBTree, error) {
 	pm, err := storage.Open(path)
 	if err != nil {
@@ -44,7 +41,7 @@ func OpenComposite(path string) (*CompositeBTree, error) {
 	return &CompositeBTree{tree: &BTree{pm: pm, rootID: rootID, entrySize: CompositeEntrySize}}, nil
 }
 
-// Close closes the underlying tree's PageManager.
+// Close closes the underlying PageManager.
 func (c *CompositeBTree) Close() error {
 	return c.tree.Close()
 }

@@ -10,14 +10,13 @@ import (
 	"github.com/DanielPopoola/index_lab/internal/page"
 )
 
-// Owns a single open file and translates `PageID`s into byte offsets for reading/writing fixed-size pages.
+// PageManager owns a single open file and translates PageIDs into byte offsets.
 type PageManager struct {
 	file       *os.File
 	nextPageID page.PageID
 }
 
-// Opens the database file at `path`, creating it if absent.
-// Infers the next allocatable `PageID` from the existing file size (`fileInfo.Size() / PageSize`).
+// Open opens the database file at path, creating it if absent.
 func Open(path string) (*PageManager, error) {
 	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
@@ -42,20 +41,19 @@ func (pm *PageManager) Close() error {
 	return pm.file.Close()
 }
 
-// Reserves and returns the next unused `PageID`, without constructing a
-// page.
+// AllocatePageID reserves and returns the next unused PageID.
 func (pm *PageManager) AllocatePageID() page.PageID {
 	id := pm.nextPageID
 	pm.nextPageID++
 	return id
 }
 
-// Reserves the next unused `PageID` and returns a fresh leaf page with that ID.
+// AllocatePage reserves the next unused PageID and returns a fresh leaf page.
 func (pm *PageManager) AllocatePage() *page.Page {
 	return page.NewLeafPage(pm.AllocatePageID())
 }
 
-// Reads the page at `id` from disk
+// ReadPage reads the page at id from disk.
 func (pm *PageManager) ReadPage(id page.PageID) (*page.Page, error) {
 	offset := int64(id) * page.PageSize
 	if _, err := pm.file.Seek(offset, io.SeekStart); err != nil {
@@ -69,7 +67,7 @@ func (pm *PageManager) ReadPage(id page.PageID) (*page.Page, error) {
 	return p, nil
 }
 
-// Writes `p.Data` to disk at the offset corresponding to `p.ID`, overwriting any existing contents there.
+// WritePage writes p to disk at the offset corresponding to p.ID.
 func (pm *PageManager) WritePage(p *page.Page) error {
 	offset := int64(p.ID) * page.PageSize
 	if _, err := pm.file.Seek(offset, io.SeekStart); err != nil {
@@ -81,12 +79,12 @@ func (pm *PageManager) WritePage(p *page.Page) error {
 	return nil
 }
 
-// Returns the number of pages allocated so far (equivalently, the next `PageID` `AllocatePage` would hand out).
+// PageCount returns the number of pages allocated so far.
 func (pm *PageManager) PageCount() page.PageID {
 	return pm.nextPageID
 }
 
-// Overrides the next `PageID` that `AllocatePage` will hand out.
+// SetNextPageID sets the next PageID that AllocatePage will hand out.
 func (pm *PageManager) SetNextPageID(id page.PageID) {
 	pm.nextPageID = id
 }

@@ -7,13 +7,14 @@ import (
 	"github.com/DanielPopoola/index_lab/internal/page"
 )
 
-// Encodes `id` as 8 big-endian bytes, for use as the value half of an internal-page entry.
+// encodeChildID encodes a PageID as 8 big-endian bytes.
 func encodeChildID(id page.PageID) []byte {
 	b := make([]byte, 8)
 	binary.BigEndian.PutUint64(b, uint64(id))
 	return b
 }
 
+// entryKeyLen returns the key portion length of entries in page p.
 func entryKeyLen(p *page.Page) int {
 	if p == nil || p.NumEntries() == 0 {
 		return 8
@@ -21,7 +22,7 @@ func entryKeyLen(p *page.Page) int {
 	return len(p.GetEntry(0)) - 8
 }
 
-// For an internal page `p`, returns the child `PageID` a search for `targetKey` should descend into.
+// findChildPageID returns the child PageID a search for targetKey should descend into.
 func findChildPageID(p *page.Page, targetKey []byte) page.PageID {
 	n := p.NumEntries()
 	if n == 0 {
@@ -42,9 +43,7 @@ func findChildPageID(p *page.Page, targetKey []byte) page.PageID {
 	return page.PageID(childID)
 }
 
-// Binary search over `p`'s sorted entries for `targetKey`, comparing the
-// first `keyLen` bytes of each entry (the actual key width, which is 8 for
-// the single-column tree and 16 for composite keys).
+// findKeyIndex does binary search over p's entries for targetKey.
 func findKeyIndex(p *page.Page, targetKey []byte) (index uint16, found bool) {
 	n := p.NumEntries()
 	if n == 0 {
@@ -63,16 +62,8 @@ func findKeyIndex(p *page.Page, targetKey []byte) (index uint16, found bool) {
 	return uint16(i), false
 }
 
-// Finds which entry index in internal page `p` has a child pointer matching
-// `childID`. Used after a merge, to find and remove the dead child's
-// entry from its parent.
-//
-// If `childID` matches p.LeftmostChildPageID() instead of any entry
-// (the leftmost child isn't stored in the entry array at all), returns
-// (p.NumEntries(), true) — a sentinel that can never collide with a
-// real entry index, since valid indices only go up to NumEntries()-1.
-// Callers must check for this case separately; it can't be removed
-// with DeleteEntry the way a normal entry can.
+// findChildIndex finds the entry index in internal page p with a child pointer matching childID.
+// If childID is the leftmost child, returns (p.NumEntries(), true) as a sentinel.
 func findChildIndex(p *page.Page, childID page.PageID) (index uint16, found bool) {
 	if p.LeftmostChildPageID() == childID {
 		return p.NumEntries(), true
@@ -89,14 +80,7 @@ func findChildIndex(p *page.Page, childID page.PageID) (index uint16, found bool
 	return 0, false
 }
 
-// Finds `node`'s left and right sibling PageIDs among `grandparent`'s
-// children. Internal pages don't carry stored Prev/Next pointers like
-// leaves do, so a node's siblings can only be found by locating its
-// position among its own parent's children and looking one position
-// to either side.
-//
-// Applies the mapping documented on findChildIndex. Returns 0 for
-// whichever side doesn't exist (node is the first or last child).
+// findSiblingPageIDs finds node's left and right sibling PageIDs among grandparent's children.
 func findSiblingPageIDs(grandparent, node *page.Page) (leftID, rightID page.PageID) {
 	idx, _ := findChildIndex(grandparent, node.ID)
 	n := grandparent.NumEntries()
@@ -117,11 +101,7 @@ func findSiblingPageIDs(grandparent, node *page.Page) (leftID, rightID page.Page
 	return leftID, rightID
 }
 
-// Borrows exactly one entry from `leftSibling` to fix `underflowing`'s
-// occupancy. Moves `leftSibling`'s LAST (largest-key) entry into
-// `underflowing` — the only entry that can move while keeping both
-// pages sorted and keeping every key in `leftSibling` still smaller
-// than every key in `underflowing`.
+// redistributeFromLeft borrows one entry from leftSibling to fix underflowing's occupancy.
 func redistributeFromLeft(underflowing, leftSibling *page.Page) (newSeparator []byte) {
 	lastIdx := leftSibling.NumEntries() - 1
 	entry := append([]byte(nil), leftSibling.GetEntry(lastIdx)...)
@@ -134,11 +114,7 @@ func redistributeFromLeft(underflowing, leftSibling *page.Page) (newSeparator []
 	return entry[:keyLen]
 }
 
-// Borrows exactly one entry from `rightSibling` to fix `underflowing`'s
-// occupancy. Moves `rightSibling`'s FIRST (smallest-key) entry into
-// `underflowing` — the only entry that can move while keeping both
-// pages sorted and keeping every key in `rightSibling` still larger
-// than every key in `underflowing`.
+// redistributeFromRight borrows one entry from rightSibling to fix underflowing's occupancy.
 func redistributeFromRight(underflowing, rightSibling *page.Page) (newSeparator []byte) {
 	entry := append([]byte(nil), rightSibling.GetEntry(0)...)
 	keyLen := len(entry) - 8
@@ -166,6 +142,7 @@ func mergeLeaf(left, right *page.Page) {
 	}
 }
 
+// mergeInternal merges right into left with the old parent separator.
 func mergeInternal(left, right *page.Page, oldParentSeparator []byte) {
 	leftmostChild := right.LeftmostChildPageID()
 	entryBytes := append(append([]byte{}, oldParentSeparator...), encodeChildID(leftmostChild)...)
@@ -176,6 +153,7 @@ func mergeInternal(left, right *page.Page, oldParentSeparator []byte) {
 	}
 }
 
+// redistributeInternalFromLeft borrows one entry from leftSibling for underflowing.
 func redistributeInternalFromLeft(underflowing, leftSibling *page.Page, oldParentSeparator []byte) (newParentSeparator []byte) {
 	lastIdx := leftSibling.NumEntries() - 1
 	lastEntry := append([]byte(nil), leftSibling.GetEntry(lastIdx)...)
@@ -192,6 +170,7 @@ func redistributeInternalFromLeft(underflowing, leftSibling *page.Page, oldParen
 	return newParentSeparator
 }
 
+// redistributeInternalFromRight borrows one entry from rightSibling for underflowing.
 func redistributeInternalFromRight(underflowing, rightSibling *page.Page, oldParentSeparator []byte) (newParentSeparator []byte) {
 	oldLeftmostChild := rightSibling.LeftmostChildPageID()
 	firstEntry := append([]byte(nil), rightSibling.GetEntry(0)...)
@@ -206,9 +185,7 @@ func redistributeInternalFromRight(underflowing, rightSibling *page.Page, oldPar
 	return newParentSeparator
 }
 
-// Splits a full leaf page. The smaller half (lower `NumEntries()/2` entries) stays in `oldPage`; the larger half moves to a newly allocated page.
-// Sibling pointers (`NextLeafPageID`/`PrevLeafPageID`) are rewired to keep the leaf linked list correct.
-// `separatorKey` is the new page's first key — a real, retrievable entry (leaf keys are never discarded).
+// splitLeaf splits a full leaf page into two.
 func splitLeaf(oldPage *page.Page, allocateFn func() *page.Page) (separatorKey []byte, newPage *page.Page, err error) {
 	mid := oldPage.NumEntries() / 2
 	separatorLen := len(oldPage.GetEntry(0)) - 8
@@ -235,8 +212,7 @@ func splitLeaf(oldPage *page.Page, allocateFn func() *page.Page) (separatorKey [
 	return separatorKey, newPage, nil
 }
 
-// Splits a full internal page in three parts: entries before the midpoint stay in `oldPage`; entries after it move to a newly allocated page;
-// the midpoint entry is consumed entirely — its key is promoted out as `separatorKey` (not retained in either half), and its child pointer becomes `newPage`'s leftmost child
+// splitInternal splits a full internal page into two.
 func splitInternal(oldPage *page.Page, allocateFn func() *page.Page) (separatorKey []byte, newPage *page.Page, err error) {
 	mid := oldPage.NumEntries() / 2
 	separatorLen := entryKeyLen(oldPage)

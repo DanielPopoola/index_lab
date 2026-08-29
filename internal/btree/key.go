@@ -5,12 +5,10 @@ import (
 	"encoding/binary"
 )
 
-// signBitMask has only the most-significant bit of a uint64 set (binary:
-// 1000...0, 63 zeros after the 1). XORing any uint64 against this flips
-// exactly that one bit and leaves the other 63 untouched.
+// signBitMask flips the sign bit to make int64 values comparable as uint64.
 const signBitMask = uint64(1) << 63
 
-// Encodes a signed `int64` into 8 bytes whose unsigned byte order matches the value's signed numeric order
+// EncodeInt64 encodes a signed int64 into 8 bytes for comparison.
 func EncodeInt64(n int64) []byte {
 	bits := uint64(n)
 	flipped := bits ^ signBitMask
@@ -20,29 +18,29 @@ func EncodeInt64(n int64) []byte {
 	return encoded
 }
 
-// Inverse of `EncodeInt64`.
+// DecodeInt64 decodes a signed int64 from encoded bytes.
 func DecodeInt64(encoded []byte) int64 {
 	decoded := binary.BigEndian.Uint64(encoded)
 	flipped := decoded ^ signBitMask
 	return int64(flipped)
 }
 
-// Compares two already-encoded keys.
+// CompareKeys compares two encoded keys.
 func CompareKeys(a, b []byte) int {
 	return bytes.Compare(a, b)
 }
 
-// CompositeEntrySize is the total per-entry byte width for a composite
-// (columnA, columnB) index: 16-byte key (two 8-byte columns) + 8-byte
-// value/recordID, vs. the single-column tree's 8+8=16.
+// CompositeEntrySize is the total per-entry byte width for a composite key.
 const CompositeEntrySize = 24
 
+// EncodeCompositeKey encodes two int64 columns into a composite key.
 func EncodeCompositeKey(columnA, columnB int64) []byte {
 	encodedColumnA := EncodeInt64(columnA)
 	encodedColumnB := EncodeInt64(columnB)
 	return append(append([]byte(nil), encodedColumnA...), encodedColumnB...)
 }
 
+// DecodeCompositeKey decodes a composite key into two int64 columns.
 func DecodeCompositeKey(encoded []byte) (columnA, columnB int64) {
 	encodedColumnA := encoded[:8]
 	encodedColumnB := encoded[8:]

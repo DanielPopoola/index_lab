@@ -10,17 +10,29 @@ import (
 )
 
 var ErrInvalidRange = errors.New("start key must be less than end key")
+var ErrDuplicateKey = errors.New("key already exists in unique index")
 
-// Persistent B+ tree backed by a single database file.
-// Wraps a `*storage.PageManager` and tracks the current root `PageID`.
+// BTree is a persistent B+ tree backed by a single database file.
 type BTree struct {
 	pm        *storage.PageManager
 	rootID    page.PageID
 	entrySize uint16
+	unique    bool
 }
 
-// Opens or creates a B+ tree at `path`.
+// Open opens or creates a B+ tree at path.
 func Open(path string) (*BTree, error) {
+	return openWith(path, 16, false)
+}
+
+// OpenUnique opens or creates a B+ tree at path with a uniqueness constraint.
+// Insert fails with ErrDuplicateKey if the key already exists.
+func OpenUnique(path string) (*BTree, error) {
+	return openWith(path, 16, true)
+}
+
+// openWith sets up file and metadata for all BTree constructor variants.
+func openWith(path string, entrySize uint16, unique bool) (*BTree, error) {
 	pm, err := storage.Open(path)
 	if err != nil {
 		return nil, err
@@ -49,21 +61,27 @@ func Open(path string) (*BTree, error) {
 		rootID = metaPage.RootPageID()
 	}
 
-	return &BTree{pm: pm, rootID: rootID, entrySize: 16}, nil
+	return &BTree{pm: pm, rootID: rootID, entrySize: entrySize, unique: unique}, nil
 }
 
-// Closes the underlying `PageManager`.
+// Close closes the underlying PageManager.
 func (t *BTree) Close() error {
 	return t.pm.Close()
 }
 
-// Inserts `(key, recordID)`.
+// Insert inserts the key-recordID pair.
 func (t *BTree) Insert(key int64, recordID int64) error {
 	encodedKey := EncodeInt64(key)
 
 	leaf, ancestors, err := t.findLeafWithPath(encodedKey)
 	if err != nil {
 		return err
+	}
+
+	if t.unique {
+		if _, found := findKeyIndex(leaf, encodedKey); found {
+			return ErrDuplicateKey
+		}
 	}
 
 	err = Insert(leaf, key, recordID)
@@ -74,9 +92,6 @@ func (t *BTree) Insert(key int64, recordID int64) error {
 		return err
 	}
 
-	// Leaf is full. Split it, insert the new key into whichever half
-	// it belongs in, then let propagateSplit wire the split into the
-	// tree (parent insert, recursive split, or new root).
 	separatorKey, newLeaf, err := splitLeaf(leaf, t.pm.AllocatePage)
 	if err != nil {
 		return err
@@ -104,7 +119,7 @@ func (t *BTree) Insert(key int64, recordID int64) error {
 	return t.propagateSplit(leaf, newLeaf, separatorKey, ancestors)
 }
 
-// Looks up `key`
+// Search searches for key and returns the recordID if found.
 func (t *BTree) Search(key int64) (recordID int64, found bool) {
 	encodedKey := EncodeInt64(key)
 
@@ -122,8 +137,7 @@ type ScanResult struct {
 	RecordID int64
 }
 
-// Scan returns every (key, recordID) pair with startKey <= key <= endKey,
-// in ascending key order.
+// Scan returns all (key, recordID) pairs with startKey <= key <= endKey.
 func (t *BTree) Scan(startKey, endKey int64) ([]ScanResult, error) {
 	if startKey > endKey {
 		return nil, ErrInvalidRange
@@ -168,7 +182,7 @@ func (t *BTree) Scan(startKey, endKey int64) ([]ScanResult, error) {
 	}
 }
 
-// Deletes `key`.
+// Delete deletes the key from the tree.
 func (t *BTree) Delete(key int64) error {
 	encodedKey := EncodeInt64(key)
 
@@ -193,10 +207,7 @@ func (t *BTree) Delete(key int64) error {
 	return t.fixLeafUnderflow(leaf, ancestors)
 }
 
-// Walks root-to-leaf, following child pointers through however many
-// internal-page levels exist. Returns `ancestors`: every internal page
-// visited on the way down, in top-down order (root first, immediate
-// parent of the leaf last)
+// findLeafWithPath walks root-to-leaf and returns the leaf and all ancestor page IDs.
 func (t *BTree) findLeafWithPath(encodedKey []byte) (leaf *page.Page, ancestors []page.PageID, err error) {
 	p, err := t.pm.ReadPage(t.rootID)
 	if err != nil {
@@ -216,18 +227,7 @@ func (t *BTree) findLeafWithPath(encodedKey []byte) (leaf *page.Page, ancestors 
 	return p, ancestors, nil
 }
 
-// Called when `leaf` has dropped below MinEntries() after a delete and
-// is not the root. Loads whichever siblings exist, then decides:
-// redistribute (cheaper, tried first) or merge (fallback when no
-// sibling has spare capacity).
-//
-// ancestors is the top-down path from findLeafWithPath; the immediate
-// parent is ancestors[len(ancestors)-1].
-//
-// For now this stops the cascade at the parent: if removing the dead
-// child's entry from the parent leaves the PARENT underflowing too,
-// this function still writes the parent as-is and returns — the
-// parent-level cascade is the next layer to add on top of this one.
+// fixLeafUnderflow fixes underflowing leaf by redistribution or merge.
 func (t *BTree) fixLeafUnderflow(leaf *page.Page, ancestors []page.PageID) error {
 	parent, err := t.pm.ReadPage(ancestors[len(ancestors)-1])
 	if err != nil {
@@ -260,8 +260,7 @@ func (t *BTree) fixLeafUnderflow(leaf *page.Page, ancestors []page.PageID) error
 	return t.mergeLeafWithRight(leaf, rightPage, parent, ancestors)
 }
 
-// Borrows one entry from leaf's left sibling and updates the parent's
-// separator entry for leaf accordingly.
+// redistributeLeafFromLeft borrows one entry from leftPage for leaf.
 func (t *BTree) redistributeLeafFromLeft(leaf, leftPage, parent *page.Page) error {
 	newSeparator := redistributeFromLeft(leaf, leftPage)
 	idx, _ := findChildIndex(parent, leaf.ID)
@@ -278,9 +277,7 @@ func (t *BTree) redistributeLeafFromLeft(leaf, leftPage, parent *page.Page) erro
 	return t.pm.WritePage(parent)
 }
 
-// Borrows one entry from leaf's right sibling and updates the parent's
-// separator entry for rightPage accordingly (not leaf — see the
-// asymmetry noted on redistributeFromRight).
+// redistributeLeafFromRight borrows one entry from rightPage for leaf.
 func (t *BTree) redistributeLeafFromRight(leaf, rightPage, parent *page.Page) error {
 	newSeparator := redistributeFromRight(leaf, rightPage)
 	idx, _ := findChildIndex(parent, rightPage.ID)
@@ -297,11 +294,7 @@ func (t *BTree) redistributeLeafFromRight(leaf, rightPage, parent *page.Page) er
 	return t.pm.WritePage(parent)
 }
 
-// Merges leaf into its left sibling. leftPage survives (absorbs leaf's
-// entries); leaf is discarded. Patches the third page (whatever now
-// sits after leftPage in the chain) if one exists, then removes leaf's
-// now-meaningless entry from the parent — which may itself now
-// underflow, handled by finishInternalMerge.
+// mergeLeafWithLeft merges leaf into its left sibling.
 func (t *BTree) mergeLeafWithLeft(leaf, leftPage, parent *page.Page, ancestors []page.PageID) error {
 	mergeLeaf(leftPage, leaf)
 	if leftPage.NextLeafPageID() != 0 {
@@ -322,9 +315,7 @@ func (t *BTree) mergeLeafWithLeft(leaf, leftPage, parent *page.Page, ancestors [
 	return t.finishInternalMerge(parent, ancestors)
 }
 
-// Merges rightPage into leaf. leaf survives (absorbs rightPage's
-// entries); rightPage is discarded. Same shape as mergeLeafWithLeft,
-// mirrored: the surviving page here is leaf, not leftPage.
+// mergeLeafWithRight merges rightPage into leaf.
 func (t *BTree) mergeLeafWithRight(leaf, rightPage, parent *page.Page, ancestors []page.PageID) error {
 	mergeLeaf(leaf, rightPage)
 	if leaf.NextLeafPageID() != 0 {
@@ -345,11 +336,7 @@ func (t *BTree) mergeLeafWithRight(leaf, rightPage, parent *page.Page, ancestors
 	return t.finishInternalMerge(parent, ancestors)
 }
 
-// updateNextLeafPrevLink repairs the backward pointer of the leaf that
-// follows newLeaf. splitLeaf can update oldPage.Next and newLeaf.Prev, but
-// it cannot persist the existing next leaf because it does not own the page
-// manager. Without this update, forward walks work while backward walks skip
-// leaves inserted before an existing middle leaf.
+// updateNextLeafPrevLink repairs the backward pointer of the leaf following newLeaf.
 func (t *BTree) updateNextLeafPrevLink(newLeaf *page.Page) error {
 	nextID := newLeaf.NextLeafPageID()
 	if nextID == 0 {
@@ -364,20 +351,9 @@ func (t *BTree) updateNextLeafPrevLink(newLeaf *page.Page) error {
 	return t.pm.WritePage(nextLeaf)
 }
 
-// Called when an internal page `node` has dropped below MinEntries()
-// (or, if node is the root, when it's been reduced to a single child)
-// after a parent-entry removal further down the tree. Mirrors
-// fixLeafUnderflow's shape: load whichever siblings exist via
-// findSiblingPageIDs (internal pages have no stored Prev/Next
-// pointers, unlike leaves), then dispatch to redistribute or merge.
-//
-// ancestors is the top-down path to node itself (node's own ancestors
-// — this function may run one or more levels above where the original
-// leaf-level cascade started, so callers must pass the right slice).
+// fixInternalUnderflow fixes underflowing internal page by redistribution or merge.
 func (t *BTree) fixInternalUnderflow(node *page.Page, ancestors []page.PageID) error {
 	if len(ancestors) == 0 {
-		// node IS the root — no minimum applies. Root-shrink check
-		// instead: reduced to a single child (no real entries left)?
 		if node.NumEntries() == 0 {
 			childID := node.LeftmostChildPageID()
 			metaPage := page.NewMetadataPage(0, childID)
@@ -420,16 +396,10 @@ func (t *BTree) fixInternalUnderflow(node *page.Page, ancestors []page.PageID) e
 	if leftSibling != nil {
 		return t.mergeInternalWithLeft(node, leftSibling, grandparent, ancestors)
 	}
-	// Mirrors fixLeafUnderflow's final branch: node underflowed, so it
-	// must have SOME sibling. If leftSibling is nil here, rightSibling
-	// is guaranteed non-nil.
 	return t.mergeInternalWithRight(node, rightSibling, grandparent, ancestors)
 }
 
-// Borrows one entry from node's left sibling. The separator being
-// updated is keyed on node.ID in grandparent (the LEFT-side
-// asymmetry: this boundary "belongs to" node, the right-hand side of
-// it — mirrors redistributeLeafFromLeft's same convention).
+// redistributeInternalNodeFromLeft borrows one entry from leftSibling for node.
 func (t *BTree) redistributeInternalNodeFromLeft(node, leftSibling, grandparent *page.Page) error {
 	idx, _ := findChildIndex(grandparent, node.ID)
 	oldSeparator := grandparent.GetEntry(idx)[:8]
@@ -449,9 +419,7 @@ func (t *BTree) redistributeInternalNodeFromLeft(node, leftSibling, grandparent 
 	return t.pm.WritePage(grandparent)
 }
 
-// Borrows one entry from node's right sibling. The separator is keyed
-// on rightSibling.ID in grandparent (RIGHT-side asymmetry — mirrors
-// redistributeLeafFromRight's convention).
+// redistributeInternalNodeFromRight borrows one entry from rightSibling for node.
 func (t *BTree) redistributeInternalNodeFromRight(node, rightSibling, grandparent *page.Page) error {
 	idx, _ := findChildIndex(grandparent, rightSibling.ID)
 	oldSeparator := grandparent.GetEntry(idx)[:8]
@@ -471,11 +439,7 @@ func (t *BTree) redistributeInternalNodeFromRight(node, rightSibling, grandparen
 	return t.pm.WritePage(grandparent)
 }
 
-// Merges node into its left sibling. leftSibling survives; node is
-// discarded. Pulls the grandparent separator down (mergeInternal),
-// removes node's now-dead entry from grandparent, then checks whether
-// grandparent itself now underflows — cascading upward via a
-// recursive fixInternalUnderflow call if so.
+// mergeInternalWithLeft merges node into its left sibling.
 func (t *BTree) mergeInternalWithLeft(node, leftSibling, grandparent *page.Page, ancestors []page.PageID) error {
 	idx, _ := findChildIndex(grandparent, node.ID)
 	separator := grandparent.GetEntry(idx)[:8]
@@ -490,8 +454,7 @@ func (t *BTree) mergeInternalWithLeft(node, leftSibling, grandparent *page.Page,
 	return t.finishInternalMerge(grandparent, ancestors)
 }
 
-// Merges rightSibling into node. node survives; rightSibling is
-// discarded. Mirror of mergeInternalWithLeft.
+// mergeInternalWithRight merges rightSibling into node.
 func (t *BTree) mergeInternalWithRight(node, rightSibling, grandparent *page.Page, ancestors []page.PageID) error {
 	idx, _ := findChildIndex(grandparent, rightSibling.ID)
 	separator := grandparent.GetEntry(idx)[:8]
@@ -506,12 +469,7 @@ func (t *BTree) mergeInternalWithRight(node, rightSibling, grandparent *page.Pag
 	return t.finishInternalMerge(grandparent, ancestors)
 }
 
-// Shared tail end of both merge branches: grandparent just lost an
-// entry (its own doing, from the merge above), so it needs the exact
-// same underflow check node itself started with. ancestors here is
-// still NODE's ancestors — grandparent's own ancestors are one
-// shorter, ancestors[:len(ancestors)-1], since grandparent was
-// ancestors[len(ancestors)-1].
+// finishInternalMerge checks grandparent for underflow after merge.
 func (t *BTree) finishInternalMerge(grandparent *page.Page, ancestors []page.PageID) error {
 	isRoot := len(ancestors) == 1 // grandparent's OWN ancestors would be empty
 	if !isRoot && grandparent.NumEntries() >= page.MinEntries(t.entrySize) {
@@ -524,7 +482,7 @@ func (t *BTree) finishInternalMerge(grandparent *page.Page, ancestors []page.Pag
 	return t.fixInternalUnderflow(grandparent, ancestors[:len(ancestors)-1])
 }
 
-// Wires an already-completed split into the tree structure.
+// propagateSplit wires a completed split into the tree structure.
 func (t *BTree) propagateSplit(p, newPage *page.Page, separatorKey []byte, ancestors []page.PageID) error {
 	if len(ancestors) == 0 {
 		newRootPage := t.pm.AllocatePage()

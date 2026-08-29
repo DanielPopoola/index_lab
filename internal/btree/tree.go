@@ -1,7 +1,4 @@
-// tree.go: forthis only handles operations on a SINGLE leaf page —
-// no internal nodes, no splitting yet. This is deliberately the smallest
-// possible "real" B+ tree operation: prove Insert/Search work correctly
-// before adding the complexity of multiple levels.
+// Package btree handles operations on a single leaf page.
 package btree
 
 import (
@@ -13,7 +10,7 @@ import (
 var ErrPageFull = errors.New("page full: splitting not yet implemented")
 var ErrKeyNotFound = errors.New("key not found")
 
-// Inserts `(key, recordID)` into `p` directly. Returns `ErrPageFull` if `p` has no room — does not split.
+// Insert inserts the key-recordID pair into p directly. Returns ErrPageFull if p has no room.
 func Insert(p *page.Page, key int64, recordID int64) error {
 	encodedKey := EncodeInt64(key)
 	entryBytes := append(encodedKey, EncodeInt64(recordID)...)
@@ -28,7 +25,7 @@ func Insert(p *page.Page, key int64, recordID int64) error {
 	return nil
 }
 
-// Looks up `key` on `p` directly. Does not traverse the tree.
+// Search searches for key on p directly. Does not traverse the tree.
 func Search(p *page.Page, key int64) (recordID int64, found bool) {
 	encodedKey := EncodeInt64(key)
 	index, ok := findKeyIndex(p, encodedKey)
@@ -40,7 +37,7 @@ func Search(p *page.Page, key int64) (recordID int64, found bool) {
 	return value, true
 }
 
-// Deletes `key` from `p` directly
+// Delete deletes key from p directly.
 func Delete(p *page.Page, key int64) error {
 	encodedKey := EncodeInt64(key)
 	index, ok := findKeyIndex(p, encodedKey)

@@ -20,20 +20,16 @@ const (
 	HeapPage
 )
 
-// PageID identifies a page's position in the file. PageID N lives at byte
-// offset N * PageSize in the underlying file — it is NOT stored as part of
-// the page's own bytes; it's derived from where you found the page.
+// PageID identifies a page's position in a file.
 type PageID uint64
 
-// In-memory representation of one fixed-size page.
-// `Data` is the raw buffer written to/read from disk verbatim.
+// Page represents an in-memory fixed-size page.
 type Page struct {
 	ID   PageID
 	Data [PageSize]byte
 }
 
-// NewLeafPage builds a fresh, empty leaf page with the given ID, ready
-// for InsertEntry calls.
+// NewLeafPage builds a fresh, empty leaf page with the given ID.
 func NewLeafPage(id PageID) *Page {
 	p := &Page{ID: id}
 	p.SetPageType(LeafPage)
@@ -41,12 +37,7 @@ func NewLeafPage(id PageID) *Page {
 	return p
 }
 
-// NewHeapPage builds a fresh, empty heap page with the given ID, ready
-// for InsertEntry calls. Heap pages use the same slot-array layout as
-// leaf pages (NumEntries, InsertEntry, GetEntry, HasSpaceFor all work
-// identically) but store opaque row bytes instead of 16-byte B+ tree
-// entries, and don't use the leaf-linking fields (NextLeafPageID etc.)
-// at all — those simply stay zero-valued and unused.
+// NewHeapPage builds a fresh, empty heap page with the given ID.
 func NewHeapPage(id PageID) *Page {
 	p := &Page{ID: id}
 	p.SetPageType(HeapPage)
@@ -71,27 +62,27 @@ func NewMetadataPage(id PageID, rootID PageID) *Page {
 	return p
 }
 
-// Root `PageID` stored on a metadata page. Metadata pages only.
+// RootPageID returns the root PageID stored on a metadata page.
 func (p *Page) RootPageID() PageID {
 	return PageID(binary.BigEndian.Uint64(p.Data[1:9]))
 }
 
-// Sets the stored root `PageID`. Metadata pages only.
+// SetRootPageID sets the root PageID on a metadata page.
 func (p *Page) SetRootPageID(id PageID) {
 	binary.BigEndian.PutUint64(p.Data[1:9], uint64(id))
 }
 
-// Returns the page's type
+// PageType returns the page's type.
 func (p *Page) PageType() PageType {
 	return PageType(p.Data[0])
 }
 
-// Sets the page's type
+// SetPageType sets the page's type.
 func (p *Page) SetPageType(t PageType) {
 	p.Data[0] = byte(t)
 }
 
-// Returns the current entry (slot) count.
+// NumEntries returns the current entry count.
 func (p *Page) NumEntries() uint16 {
 	return binary.BigEndian.Uint16(p.Data[1:3])
 }
@@ -101,32 +92,32 @@ func (p *Page) setNumEntries(n uint16) {
 	binary.BigEndian.PutUint16(p.Data[1:3], n)
 }
 
-// Right-sibling pointer. Leaf pages only; 0 if none
+// NextLeafPageID returns the right-sibling pointer for leaf pages.
 func (p *Page) NextLeafPageID() PageID {
 	return PageID(binary.BigEndian.Uint64(p.Data[13:21]))
 }
 
-// Sets the right-sibling pointer
+// SetNextLeafPageID sets the right-sibling pointer.
 func (p *Page) SetNextLeafPageID(id PageID) {
 	binary.BigEndian.PutUint64(p.Data[13:21], uint64(id))
 }
 
-// Left-sibling pointer. Leaf pages only; 0 if none. Shares storage with `LeftmostChildPageID`.
+// PrevLeafPageID returns the left-sibling pointer for leaf pages.
 func (p *Page) PrevLeafPageID() PageID {
 	return PageID(binary.BigEndian.Uint64(p.Data[5:13]))
 }
 
-// Sets the left-sibling pointer
+// SetPrevLeafPageID sets the left-sibling pointer.
 func (p *Page) SetPrevLeafPageID(id PageID) {
 	binary.BigEndian.PutUint64(p.Data[5:13], uint64(id))
 }
 
-// Leftmost-child pointer. Internal pages only. Shares storage with `PrevLeafPageID`.
+// LeftmostChildPageID returns the leftmost-child pointer for internal pages.
 func (p *Page) LeftmostChildPageID() PageID {
 	return PageID(binary.BigEndian.Uint64(p.Data[5:13]))
 }
 
-// Sets the leftmost-child pointer.
+// SetLeftmostChildPageID sets the leftmost-child pointer.
 func (p *Page) SetLeftmostChildPageID(id PageID) {
 	binary.BigEndian.PutUint64(p.Data[5:13], uint64(id))
 }
@@ -145,15 +136,13 @@ func (p *Page) setFreeSpaceOffset(offset uint16) {
 
 // --- Slot array access ---
 
-// slot is the in-memory decoded form of one slot array entry.
-// It is NOT stored as a Go struct on the page — it's decoded from
-// SlotSize raw bytes at slot index i, and encoded back the same way.
+// slot represents one slot array entry.
 type slot struct {
 	offset uint16 // byte offset into Data where this entry's bytes start
 	length uint16 // how many bytes this entry occupies
 }
 
-// getSlot decodes the slot at index i from the slot array region of Data.
+// getSlot decodes the slot at index i from the slot array.
 func (p *Page) getSlot(i uint16) slot {
 	start := HeaderSize + i*SlotSize
 	offset := binary.BigEndian.Uint16(p.Data[start : start+2])
@@ -161,21 +150,20 @@ func (p *Page) getSlot(i uint16) slot {
 	return slot{offset: offset, length: length}
 }
 
-// setSlot encodes a slot's {offset, length} at index i in the slot array.
+// setSlot encodes a slot at index i in the slot array.
 func (p *Page) setSlot(i uint16, s slot) {
 	start := HeaderSize + i*SlotSize
 	binary.BigEndian.PutUint16(p.Data[start:start+2], s.offset)
 	binary.BigEndian.PutUint16(p.Data[start+2:start+4], s.length)
 }
 
-// Returns the raw bytes of the entry at slot index `i`.
+// GetEntry returns the raw bytes of the entry at slot index i.
 func (p *Page) GetEntry(i uint16) []byte {
 	slot := p.getSlot(i)
 	return p.Data[slot.offset : slot.offset+slot.length]
 }
 
-// Reports whether `entryLen` bytes of new entry data would fit,
-// accounting for the additional slot (`SlotSize` bytes) the new entry requires.
+// HasSpaceFor reports whether entryLen bytes of new entry data would fit.
 func (p *Page) HasSpaceFor(entryLen int) bool {
 	left := HeaderSize + p.NumEntries()*SlotSize
 	right := p.freeSpaceOffset()
@@ -197,7 +185,7 @@ func MinEntries(entrySize uint16) uint16 {
 	return MaxEntries(entrySize) / 2
 }
 
-// Inserts `entryBytes` as a new entry, placing its slot at sorted position `slotIndex`.
+// InsertEntry inserts entryBytes as a new entry at the sorted position slotIndex.
 func (p *Page) InsertEntry(slotIndex uint16, entryBytes []byte) {
 	n := p.NumEntries()
 
