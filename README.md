@@ -1,75 +1,87 @@
 # index_lab
 
-## Overview
-This project provides teams with a custom-built, persistent storage engine and indexing system. It manages raw data efficiently while providing fast, structured access through advanced tree structures. The system solves the problem of handling complex data interactions on disk, making it easy to measure and optimize data retrieval workflows without relying on external database management systems.
+A persistent B+ tree index, built from scratch in Go, to understand how
+database indexes actually work — not to build a database.
 
-## System Architecture
+This project exists because reading about B+ trees, page splits, and
+buffer pools (Chapter 3 of *Designing Data-Intensive Applications*) is
+not the same as implementing one and watching it behave under load. Go
+was chosen specifically because it doesn't abstract away the low-level
+details — byte offsets, fixed-size pages, manual encoding — that this
+project is meant to teach.
+
+## What's actually in here
+
+- A slotted-page storage format and file-backed `PageManager`
+- A full B+ tree: insert, search, delete, and range scan, with leaf
+  splitting/merging and multi-level split/underflow propagation
+- Composite `(columnA, columnB)` keys, a unique-index constraint, and a
+  partial index (indexes only rows matching a predicate)
+- A minimal heap file, so the B+ tree can act as a real secondary index
+  (`key → RecordID → heap → row`), not just store rows directly
+- An LRU buffer pool with write-back caching, sitting between the tree
+  and the page manager
+- An explicit durability boundary (`Sync()`), separate from ordinary
+  writes, so "written" and "durable" are distinguishable operations
+- An experiment suite and CLI that measure all of the above under
+  different key-generation patterns
+
+See `task.md` for the full original spec, and `FINDINGS.md` for what
+the experiments actually showed.
+
+## What's explicitly *not* in here
+
+By design: no SQL parser or query planner, no transactions, no MVCC, no
+WAL or crash recovery, no concurrency (no locks/latches — this is
+single-threaded throughout), no replication, no networking. This is an
+index-and-storage laboratory, not a database.
+
+## Architecture
 
 ```mermaid
 flowchart LR
-  Application["Client Workload"]
-  TreeIndex["B+ Tree Index"]
-  HeapStore["Heap Storage Engine"]
-  DiskManager[("Disk Page Manager")]
+  App["Experiment / CLI"]
+  Tree["B+ Tree (btree)"]
+  Heap["Heap Store (heap)"]
+  Pool["Buffer Pool (buffer)<br/>LRU, write-back"]
+  PM["PageManager (storage)<br/>file I/O, fsync"]
+  File[("Database file")]
 
-  Application --> TreeIndex
-  Application --> HeapStore
-  TreeIndex --> DiskManager
-  HeapStore --> DiskManager
+  App --> Tree
+  App --> Heap
+  Tree -->|readPage / writePage| Pool
+  Heap -->|readPage / writePage| Pool
+  Pool -->|on miss / eviction / Sync| PM
+  PM --> File
 
-  style Application fill:#1e1b4b,stroke:#6366f1,stroke-width:2px,color:#fff
-  style TreeIndex fill:#2e1065,stroke:#8b5cf6,stroke-width:2px,color:#fff
-  style HeapStore fill:#2e1065,stroke:#8b5cf6,stroke-width:2px,color:#fff
-  style DiskManager fill:#0f172a,stroke:#3b82f6,stroke-width:2px,color:#fff
+  style App fill:#1e1b4b,stroke:#6366f1,stroke-width:2px,color:#fff
+  style Tree fill:#2e1065,stroke:#8b5cf6,stroke-width:2px,color:#fff
+  style Heap fill:#2e1065,stroke:#8b5cf6,stroke-width:2px,color:#fff
+  style Pool fill:#1e293b,stroke:#0ea5e9,stroke-width:2px,color:#fff
+  style PM fill:#0f172a,stroke:#3b82f6,stroke-width:2px,color:#fff
 ```
 
-## Features
+The buffer pool is optional per tree/heap instance — `btree.Open(path)`
+talks straight to the `PageManager`, `btree.Open(path,
+btree.WithBufferPool(64))` routes every read/write through the pool
+instead. This is what makes the pooled-vs-unpooled experiment possible:
+both codepaths exist side by side, not one replacing the other.
 
-* **Persistent B+ Tree Indexing**: Maintains strict data ordering directly on disk. The tree handles complex node splits, merges, and key redistributions automatically to keep reads and writes exceptionally fast under heavy loads.
+### The write-back / durability boundary
 
-```mermaid
-sequenceDiagram
-  actor Client
-  participant Tree as "B+ Tree Engine"
-  participant Page as "Disk Page Manager"
+`WritePage` only hands bytes to the OS — it does not guarantee they
+survive a crash. With a buffer pool configured, a "write" is even
+lazier: the page is marked dirty in memory and the actual disk write is
+deferred until the page is evicted or `Sync()`/`Close()` is called.
 
-  Client->>Tree: Insert key and record ID
-  Tree->>Tree: Locate appropriate leaf node
-  Tree->>Page: Request memory allocation
-  alt Node is at maximum capacity
-      Tree->>Tree: Split leaf into two separate nodes
-      Tree->>Page: Persist new node boundaries
-      Tree->>Tree: Propagate split upwards to parent
-  end
-  Tree->>Client: Confirm successful insertion
-```
-
-* **Heap Storage Engine**: Manages raw row data utilizing fixed-size disk pages. It allocates physical space intelligently and tracks absolute memory addresses to ensure data integrity across system restarts.
-
-* **Composite and Partial Indexes**: Allows developers to index across multiple data columns simultaneously. It also includes partial indexing logic to selectively track only active records, drastically reducing disk footprint.
-
-```mermaid
-sequenceDiagram
-  actor System
-  participant Partial as "Partial Index Controller"
-  participant Tree as "Base B+ Tree"
-
-  System->>Partial: Upsert record state
-  alt Record status is Active
-      Partial->>Tree: Insert record into index
-  else Record status is Deleted
-      Partial->>Tree: Remove record from index
-  end
-  Partial->>System: Acknowledge index synchronization
-```
-
-* **Workload Experimentation Suite**: Generates simulated traffic patterns like sequential inserts or randomized UUID lookups. This allows teams to accurately measure page reads, disk writes, and structural node splits to evaluate true system performance.
+`Sync()` is the explicit, separate operation that flushes any dirty
+pages still in the pool and then calls `fsync` on the underlying file.
+The point of keeping this separate from ordinary writes is to make the
+cost of durability visible and controllable — see the sync-cost
+experiment in `FINDINGS.md` for exactly how expensive fsync-per-write
+actually is.
 
 ## Usage
-
-Integrating the index and heap storage into your application involves opening the relevant disk files, performing operations, and ensuring the connections are properly closed. 
-
-The following snippet demonstrates how to initialize the storage engine, write a raw data row into the heap, and index its physical location using the B+ Tree.
 
 ```go
 package main
@@ -83,54 +95,74 @@ import (
 )
 
 func main() {
-	// Initialize the raw heap storage
 	store, err := heap.Open("data.heap")
 	if err != nil {
-		log.Fatalf("Failed to open heap storage: %v", err)
+		log.Fatalf("failed to open heap: %v", err)
 	}
 	defer store.Close()
 
-	// Initialize the B+ Tree index
+	// btree.WithBufferPool(64) here to route through an LRU pool instead.
 	index, err := btree.Open("data.index")
 	if err != nil {
-		log.Fatalf("Failed to open index: %v", err)
+		log.Fatalf("failed to open index: %v", err)
 	}
 	defer index.Close()
 
-	// Write raw information to the heap
-	recordID, err := store.Put([]byte("sample record information"))
+	recordID, err := store.Put([]byte("sample record"))
 	if err != nil {
-		log.Fatalf("Failed to write to heap: %v", err)
+		log.Fatalf("failed to write to heap: %v", err)
 	}
 
-	// Link a unique key to the physical record ID in the tree
-	err = index.Insert(1042, recordID)
-	if err != nil {
-		log.Fatalf("Failed to index record: %v", err)
+	if err := index.Insert(1042, recordID); err != nil {
+		log.Fatalf("failed to index record: %v", err)
 	}
 
-	// Retrieve the data using the index
-	foundID, ok := index.Search(1042)
-	if ok {
+	if foundID, ok := index.Search(1042); ok {
 		data, _ := store.Get(foundID)
-		fmt.Printf("Successfully retrieved: %s\n", string(data))
+		fmt.Printf("retrieved: %s\n", data)
+	}
+
+	// Force everything written so far to durable storage.
+	if err := index.Sync(); err != nil {
+		log.Fatalf("sync failed: %v", err)
 	}
 }
 ```
 
-## Technologies Used
+## Running the experiments
+
+```sh
+make build          # go build -o bin/indexlab ./cmd/indexlab
+make test           # go test ./...
+make run            # run every experiment, N=5000 by default
+```
+
+Per-experiment targets, and overridable parameters:
+
+```sh
+make run-workload                          # key-pattern vs. tree shape
+make run-reads                             # pages touched per operation
+make run-writes                            # index write amplification
+make run-bufferpool POOL_CAPACITY=2000     # pooled vs. unpooled I/O
+make run-sync SYNC_INTERVAL=100            # fsync strategy cost
+
+make run N=200000 POOL_CAPACITY=64 SYNC_INTERVAL=100
+```
+
+Or run the binary directly for more control:
+
+```sh
+./bin/indexlab -run=bufferpool -n=200000 -pool-capacity=2000
+```
+
+## Technologies used
 
 | Category | Technology |
 |---|---|
-| Programming Language | [Go](https://go.dev/) |
-| Architecture | B+ Trees, Fixed-size Paging, Disk Management |
+| Language | [Go](https://go.dev/) |
+| Techniques | B+ trees, slotted pages, LRU write-back caching, explicit fsync boundary |
+| Reference | *Designing Data-Intensive Applications*, Chapter 3 |
 
 ## Author
 
 * GitHub: [DanielPopoola](https://github.com/DanielPopoola)
-
-##
-
-[![Go](https://img.shields.io/badge/Go-00ADD8?style=for-the-badge&logo=go&logoColor=white)](https://go.dev/)
-
-[![Readme was generated by Dokugen](https://img.shields.io/badge/Readme%20was%20generated%20by-Dokugen-brightgreen)](https://dokugen.samueltuoyo.com)
